@@ -182,9 +182,11 @@ class ToolDispatcher:
         # policy via Policy.requires_confirmation -> either invoke or create
         # PendingAction; (4) audit every dispatch, execution, and gating
         # decision with agent, tool, tier, provenance.
-    async def execute_confirmed(self, action_id: str) -> ToolResult
-        # Resolves the pending action as approved, re-checks the allowlist,
-        # invokes, audits.
+    async def execute_confirmed(self, action_id: str, agent: LoadedAgent | None) -> ToolResult
+        # Resolves the pending action as approved, re-checks the allowlist
+        # against the CURRENT agent (the caller looks it up in the registry;
+        # None means the agent no longer exists and the call is refused with
+        # ToolNotAllowedError), invokes, audits.
 ```
 
 ### domain/user_model.py — the evolving model of the owner
@@ -236,9 +238,8 @@ def detect_conflicts(plans: list[Plan], weekly_capacity: int) -> list[Conflict]
     # time/duration windows)
 
 class Conductor:
-    def __init__(self, model: ModelPort, user_model: UserModelService,
-                 clock: ClockPort) -> None
-    async def reconcile(self, plans: list[Plan]) -> ReconciledSchedule
+    def __init__(self, model: ModelPort, clock: ClockPort) -> None
+    async def reconcile(self, plans: list[Plan], profile: UserProfile) -> ReconciledSchedule
         # detect_conflicts first; when none, passthrough with summary and
         # total_load. When conflicts exist, one structured_call asking the
         # model to resolve them (move/shrink/drop) given the user profile;
@@ -326,6 +327,28 @@ class ReflectionEngine:
         # silent edits.
 ```
 
+### domain/executor.py — running one agent
+
+```python
+class AgentExecutor:
+    def __init__(self, model: ModelPort, tools: ToolPort,
+                 dispatcher: ToolDispatcher, user_model: UserModelService,
+                 store: StorePort, clock: ClockPort) -> None
+    async def run(self, agent: LoadedAgent, *, text: str,
+                  provenance: Provenance, max_rounds: int = 3) -> ExecutionResult
+        # Assembles the prompt: agent.md + governance preamble + user-model
+        # summary + adherence hint (feedback.plan_adjustment_hint) + the
+        # specs of allowlisted tools + the AgentReply output contract. Each
+        # round is one structured_call(schema=AgentReply). Tool calls go
+        # through ToolDispatcher; executed results are fed back as tool
+        # messages, gated ones accumulate as pending. ToolNotAllowedError /
+        # ToolNotFoundError are caught, audited, and fed back as refusal
+        # text, never crash the run. Plans are stamped (agent, created_at)
+        # and persisted to Collections.PLANS; observations recorded via
+        # UserModelService. Loop continues while reply.done is False and
+        # rounds remain.
+```
+
 ### adapters (frozen constructor surfaces)
 
 ```python
@@ -397,8 +420,11 @@ class AlfredCore:
 # runtime/heartbeat.py
 class Heartbeat:
     def __init__(self, registry: AgentRegistry, clock: ClockPort,
-                 store: StorePort, core: "AlfredCore",
+                 store: StorePort,
+                 runner: Callable[[ScheduledTrigger], Awaitable[None]],
                  config: HeartbeatConfig) -> None
+    # runner is AlfredCore.run_scheduled in production; injecting a callable
+    # keeps the scheduler decoupled and directly testable
     async def tick(self) -> list[ScheduledTrigger]   # due jobs, fired via core
     async def run_forever(self) -> None
     # due-ness: manifest Schedule + lifecycle check_in_interval + periodic
