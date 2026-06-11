@@ -1,0 +1,96 @@
+# ALFRED configuration example.
+#
+# Copy this file to config/alfred.yaml (gitignored) and edit it for your
+# setup. Every field of the configuration tree is shown below with its
+# default. Secrets never live in this file: the Discord token is read from
+# the environment (see .env.example).
+
+# Directory where ALFRED keeps its database and runtime state.
+# Default: data
+data_dir: data
+
+# Directory scanned at startup for agent folders (manifest.yaml + agent.md).
+# Default: agents
+agents_dir: agents
+
+# SQLite database filename, created inside data_dir.
+# Default: alfred.db
+db_filename: alfred.db
+
+# IANA timezone name, e.g. "Australia/Melbourne". null means use the
+# system's local timezone. Default: null
+timezone: null
+
+# Local model backend (Ollama).
+llm:
+  # Ollama server URL. Stays on localhost by default: local-first means
+  # the brain never leaves your machine. Default: http://127.0.0.1:11434
+  host: "http://127.0.0.1:11434"
+
+  # Primary model. Must be pulled first: `ollama pull qwen3:8b`.
+  # Default: qwen3:8b
+  name: "qwen3:8b"
+
+  # Tried in order when the primary model is not available locally.
+  # Default: [qwen2.5:7b, llama3.1:8b]
+  fallbacks:
+    - "qwen2.5:7b"
+    - "llama3.1:8b"
+
+  # Default sampling temperature. Lower is more deterministic; 0.4 keeps
+  # plans consistent without being robotic. Default: 0.4
+  temperature: 0.4
+
+# Discord transport. ALFRED listens for the owner and ignores everyone else.
+discord:
+  # Name of the environment variable that holds the bot token. The token
+  # itself NEVER goes in this file. Default: ALFRED_DISCORD_TOKEN
+  token_env: ALFRED_DISCORD_TOKEN
+
+  # Your Discord user id. ALFRED obeys only this user; messages from
+  # anyone else are silently ignored. To find yours: Discord -> User
+  # Settings -> Advanced -> enable Developer Mode, then right-click your
+  # name in any chat and choose "Copy User ID". Default: 0 (replace it,
+  # nothing useful happens until you do).
+  owner_id: 0
+
+  # Optional: restrict ALFRED to one channel id. null means any channel
+  # the owner writes in. Default: null
+  channel_id: null
+
+# Proactive scheduler: weekly plans, check-ins, periodic reflection.
+heartbeat:
+  # Master switch for proactive behaviour. With this off ALFRED only
+  # ever replies, never initiates. Default: true
+  enabled: true
+
+  # How often the scheduler wakes to look for due jobs, in seconds.
+  # Minimum 5. Default: 60
+  tick_seconds: 60
+
+  # No proactive messages inside this window ("HH:MM-HH:MM" local time).
+  # Default: "22:30-07:30"
+  quiet_hours: "22:30-07:30"
+
+  # Cadence of the periodic Conductor reflection, in days. Default: 7
+  reflection_days: 7
+
+# Governance knobs. The defaults are the safe direction; loosen them
+# deliberately, never by accident.
+policy:
+  # When true, reversible-write tools (e.g. log_note) run without asking,
+  # though every call is still audited. Externally-triggered content
+  # always confirms regardless of this setting. Default: true
+  auto_approve_reversible: true
+
+  # When true, workflows that touch multiple systems preview their actions
+  # before executing them. Default: true
+  dry_run_cross_system: true
+
+  # Hours before an unconfirmed pending action expires. Default: 24
+  pending_action_ttl_hours: 24
+
+# MCP servers (the phase 6 action layer). Empty in v1. When you are ready
+# to connect one, see config/mcp.example.yaml for the block format and how
+# to classify each tool's capability tier.
+mcp_servers: []

@@ -1,0 +1,31 @@
+name: study
+description: >-
+  Plans the owner's weekly academic work: spaced revision, exam preparation
+  planned backwards from named dates, and assignment pacing. Favours active
+  recall and past papers over rereading, and protects one zero-study
+  recovery evening every week.
+version: 1
+domain: academics
+shape: skill
+lifecycle: established
+triggers:
+  keywords:
+    - study
+    - exam
+    - lecture
+    - assignment
+    - revision
+    - uni
+    - course
+    - semester
+  always: false
+schedule:
+  kind: weekly
+  days: [mon]
+  time: "08:30"
+allowed_tools:
+  - current_time
+  - list_plans
+  - list_recent_outcomes
+  - log_note
+capacity_cost: 6

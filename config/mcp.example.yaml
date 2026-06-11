@@ -1,0 +1,42 @@
+# MCP server examples: the phase 6 action layer.
+#
+# This file is illustrative documentation, nothing reads it. Servers are
+# actually listed under `mcp_servers:` in config/alfred.yaml; copy a block
+# like the one below into that list when you connect a real server.
+#
+# How it works: every MCP server you connect exposes its tools to ALFRED
+# through ToolPort, namespaced as "<server>.<tool>". Connecting a server
+# grants nothing by itself: an agent can only call a tool that is also on
+# its own manifest allowlist. Both gates must open.
+#
+# tool_tiers classifies how dangerous each tool is, which decides whether
+# a call needs your confirmation:
+#
+#   read_only        - runs automatically; it can only look.
+#   reversible_write - runs automatically when policy.auto_approve_reversible
+#                      is true (every call audited); externally-triggered
+#                      calls still always confirm.
+#   destructive      - ALWAYS asks you first, no exceptions.
+#
+# Any tool you do not list in tool_tiers defaults to destructive. That is
+# deliberate: safe by default. Classifying a tool can relax its gate, but
+# nothing can bypass the gate entirely.
+#
+# Example: a calendar server launched over stdio. Adjust command, args,
+# env, and the tool names to match the actual server you install.
+#
+# mcp_servers:
+#   - name: calendar
+#     command: npx
+#     args: ["-y", "example-calendar-mcp-server"]
+#     env:
+#       CALENDAR_CREDENTIALS_FILE: "C:/Users/you/.config/calendar/credentials.json"
+#     tool_tiers:
+#       list_events: read_only
+#       get_event: read_only
+#       check_availability: read_only
+#       create_event: reversible_write
+#       update_event: reversible_write
+#       delete_event: destructive
+#       # any tool the server exposes that is not listed here is treated
+#       # as destructive and will always require confirmation.

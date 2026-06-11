@@ -1,0 +1,33 @@
+name: training
+description: >-
+  Plans and adapts the owner's weekly physical training (strength,
+  conditioning, climbing, running) and the recovery around it. Progresses
+  only on completed weeks, deloads on pain or missed sessions, and never
+  programs through injury.
+version: 1
+domain: training
+shape: skill
+lifecycle: established
+triggers:
+  keywords:
+    - train
+    - training
+    - gym
+    - workout
+    - lift
+    - deload
+    - sore
+    - climb
+    - run
+    - session
+  always: false
+schedule:
+  kind: weekly
+  days: [mon]
+  time: "08:00"
+allowed_tools:
+  - current_time
+  - list_plans
+  - list_recent_outcomes
+  - log_note
+capacity_cost: 6
