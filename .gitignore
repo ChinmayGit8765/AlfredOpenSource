@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# ALFRED local state (never commit the owner's data)
+*.db
+*.db-wal
+*.db-shm
+.env
+config/alfred.yaml
+config/mcp.yaml
+agents/*/state/
+
+# OS
+.DS_Store
+Thumbs.db
