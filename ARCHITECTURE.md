@@ -328,6 +328,37 @@ class ReflectionEngine:
         # silent edits.
 ```
 
+### domain/memory.py — explicit recallable facts
+
+```python
+def tokenize(text: str) -> set[str]      # lowercase content tokens, stopword-light
+
+class MemoryService:
+    def __init__(self, store: StorePort, clock: ClockPort) -> None
+    async def remember(self, text, *, source="owner", kind="fact", tags=None) -> Memory
+    async def recall(self, query: str, *, limit: int = 5) -> list[Memory]
+        # deterministic token-overlap scoring, recency tiebreak; zero
+        # overlap never surfaces; swap in a vector index later behind the
+        # same surface without touching callers
+    async def recent(self, limit: int = 10) -> list[Memory]
+    async def forget(self, memory_id: str) -> bool
+    async def context_for(self, text: str, *, limit: int = 4) -> str
+        # compact prompt block of relevant memories; "" when none
+```
+
+The executor injects context_for(inbound text) plus a digest of the other
+agents' current-week plans into every agent brief: agents share one
+picture of the owner, never private silos. Owner surface in core:
+remember / recall / memories / forget, plus "what do you know about X".
+
+### Channel namespacing (binding for all transports)
+
+Channels carry their transport: "discord:<id>", "telegram:<chat_id>",
+"http:<request>", "cli". MultiTransport (composition) routes outbound by
+prefix; bare numeric channels route to Discord for back-compat. Every
+transport ignores all senders except its configured owner id, and
+serializes calls into the core behind a lock.
+
 ### domain/executor.py — running one agent
 
 ```python
@@ -380,9 +411,28 @@ class DiscordTransportAdapter:                  # implements TransportPort
 
 # adapters/local_tools.py
 class LocalToolAdapter:                         # implements ToolPort
-    def __init__(self, store: StorePort, clock: ClockPort) -> None
+    def __init__(self, store: StorePort, clock: ClockPort,
+                 memory: MemoryService | None = None) -> None
     # built-ins (all READ_ONLY unless noted): current_time, list_plans,
-    # list_recent_outcomes, list_agents_state, log_note (REVERSIBLE_WRITE)
+    # list_recent_outcomes, list_agents_state, recall_memories,
+    # log_note (REVERSIBLE_WRITE), remember_fact (REVERSIBLE_WRITE).
+    # The MemoryService is injected by the composition root; receiving a
+    # domain service via constructor is the sanctioned exception to the
+    # adapters-do-not-import-domain-services rule.
+
+# adapters/telegram_transport.py
+class TelegramTransportAdapter:                 # implements TransportPort
+    def __init__(self, config: TelegramConfig, handler, *, client=None) -> None
+    async def start(self) -> None               # long-polls getUpdates
+    # httpx over the Bot API; owner-id gated; channels "telegram:<chat_id>"
+
+# adapters/http_transport.py
+class HttpTransportAdapter:                     # implements TransportPort
+    def __init__(self, config: HttpConfig, handler) -> None   # token mandatory
+    def make_app(self) -> web.Application
+    async def start(self) -> None
+    # POST /message {"text": ...} with Bearer auth -> {"replies": [...]};
+    # unauthenticated callers get 404, not 401; 127.0.0.1 by default
 
 # adapters/mcp_tools.py  (phase 6 surface, shipped behind optional dep)
 class McpToolAdapter:                           # implements ToolPort

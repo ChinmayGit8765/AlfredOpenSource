@@ -27,6 +27,7 @@ from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.governance import PendingActions, Policy, Proposals
+from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry
 from alfred.domain.user_model import UserModelService
@@ -79,9 +80,9 @@ class SystemClock:
 class SwitchableTransport:
     """TransportPort whose delivery target can be swapped after wiring.
 
-    The core needs a transport at construction, but the real transport
-    (Discord) needs the core's handler first. This wrapper breaks the
-    cycle: build with a capturing default, switch the inner later.
+    The core needs a transport at construction, but the real transports
+    need the core's handler first. This wrapper breaks the cycle: build
+    with a capturing default, switch the inner later.
     """
 
     def __init__(self, inner: TransportPort | None = None) -> None:
@@ -89,6 +90,41 @@ class SwitchableTransport:
 
     async def send(self, message: OutboundMessage) -> None:
         await self.inner.send(message)
+
+
+class MultiTransport:
+    """Routes outbound messages to the right transport by channel namespace.
+
+    Channels carry their transport as a prefix ("discord:123",
+    "telegram:456", "http:abc"); the message goes to whichever registered
+    transport owns that prefix. Bare numeric channels route to the
+    default (Discord, historically unprefixed). Unroutable messages are
+    dropped loudly, never silently.
+    """
+
+    def __init__(
+        self,
+        routes: dict[str, TransportPort],
+        default: TransportPort | None = None,
+    ) -> None:
+        self._routes = dict(routes)
+        self._default = default
+
+    async def send(self, message: OutboundMessage) -> None:
+        prefix = message.channel.split(":", 1)[0] if ":" in message.channel else ""
+        transport = self._routes.get(prefix)
+        if transport is None and message.channel.isdigit():
+            transport = self._routes.get("discord", self._default)
+        if transport is None:
+            transport = self._default
+        if transport is None:
+            logger.warning(
+                "no transport for channel %s; dropping: %.120s",
+                message.channel,
+                message.text,
+            )
+            return
+        await transport.send(message)
 
 
 class McpSlot:
@@ -228,6 +264,7 @@ class ComposedSystem:
     tools: ToolPort
     registry: AgentRegistry
     user_model: UserModelService
+    memory: MemoryService
     dispatcher: ToolDispatcher
     pending: PendingActions
     proposals: Proposals
@@ -260,8 +297,11 @@ def build_system(
         store = SqliteStoreAdapter(config.db_path)
         model = OllamaModelAdapter(config.llm)
 
+    memory = MemoryService(store, clock)
     mcp_slot = McpSlot()
-    tools = CompositeToolAdapter([LocalToolAdapter(store, clock), mcp_slot])
+    tools = CompositeToolAdapter(
+        [LocalToolAdapter(store, clock, memory=memory), mcp_slot]
+    )
 
     if transport is None:
         transport = SwitchableTransport()
@@ -274,7 +314,9 @@ def build_system(
     )
     proposals = Proposals(store, clock)
     dispatcher = ToolDispatcher(tools, store, clock, policy, pending)
-    executor = AgentExecutor(model, tools, dispatcher, user_model, store, clock)
+    executor = AgentExecutor(
+        model, tools, dispatcher, user_model, store, clock, memory=memory
+    )
     conductor = Conductor(model, clock)
     builder = AgentBuilder(model, user_model, store, clock)
     reflection = ReflectionEngine(model, user_model, store, clock)
@@ -294,6 +336,7 @@ def build_system(
         transport,
         config,
         config.agents_dir,
+        memory=memory,
     )
     heartbeat = Heartbeat(
         registry=registry,
@@ -316,6 +359,7 @@ def build_system(
         tools=tools,
         registry=registry,
         user_model=user_model,
+        memory=memory,
         dispatcher=dispatcher,
         pending=pending,
         proposals=proposals,

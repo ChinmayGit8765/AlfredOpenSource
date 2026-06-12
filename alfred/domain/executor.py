@@ -16,6 +16,7 @@ from datetime import timedelta
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.feedback import plan_adjustment_hint
 from alfred.domain.governance import audit
+from alfred.domain.memory import MemoryService
 from alfred.domain.registry import LoadedAgent
 from alfred.domain.schemas import (
     AgentReply,
@@ -84,6 +85,7 @@ class AgentExecutor:
         user_model: UserModelService,
         store: StorePort,
         clock: ClockPort,
+        memory: MemoryService | None = None,
     ) -> None:
         self._model = model
         self._tools = tools
@@ -91,6 +93,7 @@ class AgentExecutor:
         self._user_model = user_model
         self._store = store
         self._clock = clock
+        self._memory = memory
 
     async def run(
         self,
@@ -101,7 +104,7 @@ class AgentExecutor:
         max_rounds: int = 3,
     ) -> ExecutionResult:
         name = agent.manifest.name
-        system = await self._assemble_system_prompt(agent)
+        system = await self._assemble_system_prompt(agent, inbound_text=text)
         result = ExecutionResult(agent=name)
 
         conversation: list[ModelMessage] = []
@@ -177,9 +180,22 @@ class AgentExecutor:
         )
         return result
 
-    async def _assemble_system_prompt(self, agent: LoadedAgent) -> str:
+    async def _assemble_system_prompt(
+        self, agent: LoadedAgent, *, inbound_text: str = ""
+    ) -> str:
         sections = [agent.prompt, _GOVERNANCE_PREAMBLE]
         sections.append(await self._user_model.summary_for_prompt())
+
+        # Cohesion: every agent is briefed with the memories the message
+        # touches and with what its peers have already planned this week,
+        # so the system behaves like one assistant, not a row of silos.
+        if self._memory is not None and inbound_text:
+            memory_block = await self._memory.context_for(inbound_text)
+            if memory_block:
+                sections.append(memory_block)
+        peers = await self._peer_plan_digest(agent.manifest.name)
+        if peers:
+            sections.append(peers)
 
         profile = await self._user_model.get_profile()
         stats = profile.adherence.get(agent.manifest.name)
@@ -192,6 +208,41 @@ class AgentExecutor:
         sections.append(_render_tool_specs(specs))
         sections.append(_OUTPUT_CONTRACT)
         return "\n\n".join(section for section in sections if section.strip())
+
+    async def _peer_plan_digest(self, agent_name: str) -> str:
+        """One line per other agent's current-week plan; "" when none exist."""
+        today = self._clock.now().date()
+        week_of = today - timedelta(days=today.weekday())
+        docs = await self._store.query(
+            Collections.PLANS, limit=100, newest_first=True
+        )
+        lines: list[str] = []
+        seen: set[str] = set()
+        for doc in docs:
+            data = {k: v for k, v in doc.items() if k != "_key"}
+            try:
+                plan = Plan.model_validate(data)
+            except ValueError:
+                continue
+            if (
+                not plan.agent
+                or plan.agent == agent_name
+                or plan.agent in seen
+                or plan.week_of != week_of
+            ):
+                continue
+            seen.add(plan.agent)
+            titles = "; ".join(item.title for item in plan.items[:4])
+            lines.append(
+                f"- {plan.agent}: {len(plan.items)} item(s), load "
+                f"{plan.total_load}: {titles}"
+            )
+        if not lines:
+            return ""
+        return (
+            "Other agents' plans for this week (respect their load; the "
+            "owner's capacity is shared):\n" + "\n".join(lines)
+        )
 
     async def _handle_tool_call(
         self,

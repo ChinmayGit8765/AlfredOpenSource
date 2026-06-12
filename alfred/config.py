@@ -42,6 +42,44 @@ class DiscordConfig(BaseModel):
         return value
 
 
+class TelegramConfig(BaseModel):
+    """Telegram transport settings. The bot token comes from the environment."""
+
+    enabled: bool = False
+    token_env: str = "ALFRED_TELEGRAM_TOKEN"
+    owner_id: int = 0  # Telegram user id; only this user is ever obeyed
+
+    def token(self) -> str:
+        value = os.environ.get(self.token_env, "")
+        if not value:
+            raise ConfigError(
+                f"Telegram token not found in environment variable {self.token_env}"
+            )
+        return value
+
+
+class HttpConfig(BaseModel):
+    """Local HTTP API: lets Shortcuts, Tasker, curl, anything reach ALFRED.
+
+    Off by default and bound to localhost by default; exposure beyond the
+    machine is a deliberate opt-in, and the bearer token is mandatory.
+    """
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8765
+    token_env: str = "ALFRED_HTTP_TOKEN"
+
+    def token(self) -> str:
+        value = os.environ.get(self.token_env, "")
+        if not value:
+            raise ConfigError(
+                f"HTTP API token not found in environment variable {self.token_env}; "
+                "the API never runs without one"
+            )
+        return value
+
+
 class HeartbeatConfig(BaseModel):
     """Proactive scheduler settings."""
 
@@ -81,6 +119,8 @@ class AlfredConfig(BaseModel):
     timezone: str | None = None  # None = system local
     llm: ModelConfig = Field(default_factory=ModelConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    http: HttpConfig = Field(default_factory=HttpConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)

@@ -111,8 +111,31 @@ $env:ALFRED_DISCORD_TOKEN = "your-bot-token"
 alfred run
 ```
 
-`alfred run` starts the Discord gateway and the heartbeat and blocks until
-Ctrl-C.
+`alfred run` starts every configured transport plus the heartbeat and
+blocks until Ctrl-C (or `alfred stop` in chat).
+
+### Talk to it from anywhere
+
+One brain, many doors. Every transport feeds the same core, the same
+memory, the same agents; ALFRED ignores everyone except its owner on all
+of them.
+
+| Transport | Setup | Good for |
+|---|---|---|
+| Terminal | `alfred chat` | at the keyboard, offline with `--fake` |
+| Discord | bot token + `discord.owner_id` | desktop + phone, rich threads |
+| Telegram | @BotFather token + `telegram.owner_id`, `telegram.enabled: true` | phone-first, fastest setup |
+| HTTP API | `http.enabled: true` + `ALFRED_HTTP_TOKEN` | iOS Shortcuts, Tasker, curl, scripts |
+
+The HTTP API is one POST: `{"text": "done with training"}` with a Bearer
+token to `127.0.0.1:8765/message`, replies in the response body. Bind it
+beyond localhost only if you mean it.
+
+On the action side, the MCP layer is the connector surface: calendar,
+filesystem, notes vault, GitHub, home automation, wearables. See the
+recipe book in [config/mcp.example.yaml](config/mcp.example.yaml); every
+server the ecosystem publishes is a new ALFRED capability with zero new
+ALFRED code, and unclassified tools always land on the strictest gate.
 
 ## How it works
 
@@ -151,6 +174,22 @@ An agent is a folder under `agents/` with a `manifest.yaml` and an
 | `model` | object or null | per-agent overrides: model, temperature, max_tokens |
 
 See [docs/AGENTS.md](docs/AGENTS.md) for the full guide to writing one.
+
+### Memory: it refers to things
+
+Say `remember physio said no overhead pressing until March` once. From
+then on, any conversation that touches pressing gets that fact injected
+into the agent's brief automatically, every agent can search the same
+memory through gated tools, and you can ask `what do you know about my
+shoulder` from any transport. `memories` lists, `forget <id>` deletes;
+it is your record. Recall is deterministic keyword scoring (offline,
+explainable, instant); a vector index can replace it later behind the
+same interface.
+
+Cohesion runs deeper than memory: every agent run is briefed with the
+shared owner profile, the relevant memories, and what the other agents
+have already planned this week, so training knows exam week is heavy
+without being told twice.
 
 ### The weekly loop
 

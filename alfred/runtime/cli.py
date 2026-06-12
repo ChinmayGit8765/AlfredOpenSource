@@ -21,7 +21,9 @@ from rich.syntax import Syntax
 
 import alfred
 from alfred.adapters.discord_transport import DiscordTransportAdapter
+from alfred.adapters.http_transport import HttpTransportAdapter
 from alfred.adapters.ollama_model import OllamaModelAdapter
+from alfred.adapters.telegram_transport import TelegramTransportAdapter
 from alfred.config import AlfredConfig, load_config
 from alfred.domain.schemas import InboundMessage, Plan
 from alfred.domain.structured import structured_call
@@ -33,6 +35,7 @@ from alfred.runtime.agent_loader import load_agents
 from alfred.runtime.composition import (
     ComposedSystem,
     DryRunModel,
+    MultiTransport,
     SwitchableTransport,
     build_system,
     connect_mcp,
@@ -226,21 +229,69 @@ async def _cmd_run(config_path: str | None) -> int:
     config.llm.name = chosen
     ui.step(f"model ready: {chosen}")
 
-    if config.discord.owner_id == 0:
-        console.print(
-            "[warn]WARNING:[/] discord.owner_id is 0 (the default), so EVERY "
-            "message will be ignored. Set your Discord user id in "
-            "config/alfred.yaml."
-        )
-
     await connect_mcp(system)
     if config.mcp_servers:
         ui.step(f"MCP servers configured: {len(config.mcp_servers)}")
 
-    discord = DiscordTransportAdapter(config.discord, system.core.handle_inbound)
+    # Every transport with credentials runs; the owner reaches the same
+    # brain from whichever channel is in reach.
+    routes: dict[str, "object"] = {}
+    adapters: list[object] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    if os.environ.get(config.discord.token_env):
+        if config.discord.owner_id == 0:
+            console.print(
+                "[warn]WARNING:[/] discord.owner_id is 0 (the default), so "
+                "EVERY Discord message will be ignored. Set your user id in "
+                "config/alfred.yaml."
+            )
+        discord = DiscordTransportAdapter(config.discord, system.core.handle_inbound)
+        routes["discord"] = discord
+        adapters.append(discord)
+        tasks.append(asyncio.create_task(discord.start(), name="discord"))
+        ui.step("Discord gateway starting")
+    else:
+        ui.step(f"Discord off ({config.discord.token_env} not set)")
+
+    if config.telegram.enabled and os.environ.get(config.telegram.token_env):
+        if config.telegram.owner_id == 0:
+            console.print(
+                "[warn]WARNING:[/] telegram.owner_id is 0, so EVERY Telegram "
+                "message will be ignored. Set your user id in config/alfred.yaml."
+            )
+        telegram = TelegramTransportAdapter(
+            config.telegram, system.core.handle_inbound
+        )
+        routes["telegram"] = telegram
+        adapters.append(telegram)
+        tasks.append(asyncio.create_task(telegram.start(), name="telegram"))
+        ui.step("Telegram polling starting")
+    elif config.telegram.enabled:
+        ui.step(f"Telegram off ({config.telegram.token_env} not set)")
+
+    if config.http.enabled:
+        try:
+            http_api = HttpTransportAdapter(config.http, system.core.handle_inbound)
+        except AlfredError as exc:
+            console.print(f"[warn]HTTP API off:[/] {exc}")
+        else:
+            routes["http"] = http_api
+            adapters.append(http_api)
+            tasks.append(asyncio.create_task(http_api.start(), name="http"))
+            ui.step(f"HTTP API on {config.http.host}:{config.http.port}")
+
+    if not tasks:
+        console.print(
+            "[bad]No transport is configured.[/] Set a Discord or Telegram "
+            "token, or enable the HTTP API, then run again. Meanwhile, "
+            "alfred chat works in this terminal."
+        )
+        await _shutdown(system)
+        return 1
+
     if isinstance(system.transport, SwitchableTransport):
-        system.transport.inner = discord
-    ui.step("Discord gateway starting")
+        system.transport.inner = MultiTransport(routes)  # type: ignore[arg-type]
 
     async def watch_stop() -> None:
         # The owner's kill switch: "alfred stop" in chat sets the flag and
@@ -248,10 +299,7 @@ async def _cmd_run(config_path: str | None) -> int:
         while not system.core.stop_requested:
             await asyncio.sleep(1)
 
-    tasks = [
-        asyncio.create_task(discord.start(), name="discord"),
-        asyncio.create_task(watch_stop(), name="stop-watch"),
-    ]
+    tasks.append(asyncio.create_task(watch_stop(), name="stop-watch"))
     if config.heartbeat.enabled:
         tasks.append(
             asyncio.create_task(system.heartbeat.run_forever(), name="heartbeat")
@@ -293,7 +341,8 @@ async def _cmd_run(config_path: str | None) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await _close_quietly(discord)
+        for adapter in adapters:
+            await _close_quietly(adapter)
         await _shutdown(system)
         console.print("[chrome]Stopped.[/]")
     return exit_code
@@ -411,7 +460,43 @@ async def _cmd_doctor(config_path: str | None) -> int:
     else:
         console.print(
             ui.check_line(
-                "warn", "discord token", f"{config.discord.token_env} not set; run needs it"
+                "warn",
+                "discord token",
+                f"{config.discord.token_env} not set; Discord transport stays off",
+            )
+        )
+
+    if not config.telegram.enabled:
+        console.print(ui.check_line("off", "telegram", "disabled in config"))
+    elif not os.environ.get(config.telegram.token_env):
+        console.print(
+            ui.check_line(
+                "warn", "telegram", f"enabled but {config.telegram.token_env} not set"
+            )
+        )
+    elif config.telegram.owner_id == 0:
+        console.print(
+            ui.check_line("warn", "telegram", "owner_id is 0; every message ignored")
+        )
+    else:
+        console.print(
+            ui.check_line("ok", "telegram", f"owner {config.telegram.owner_id}")
+        )
+
+    if not config.http.enabled:
+        console.print(ui.check_line("off", "http api", "disabled in config"))
+    elif not os.environ.get(config.http.token_env):
+        console.print(
+            ui.check_line(
+                "warn",
+                "http api",
+                f"enabled but {config.http.token_env} not set; it will not start",
+            )
+        )
+    else:
+        console.print(
+            ui.check_line(
+                "ok", "http api", f"{config.http.host}:{config.http.port}, token set"
             )
         )
 

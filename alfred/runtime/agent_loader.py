@@ -33,11 +33,13 @@ def render_manifest_yaml(manifest: AgentManifest) -> str:
 
 
 def _load_one(folder: Path) -> LoadedAgent:
-    raw = yaml.safe_load((folder / _MANIFEST_FILE).read_text(encoding="utf-8"))
+    # utf-8-sig: Windows editors love prepending a BOM to hand-edited
+    # files, and a BOM must never be the reason an agent fails to load.
+    raw = yaml.safe_load((folder / _MANIFEST_FILE).read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise ManifestError(f"manifest root must be a mapping: {folder / _MANIFEST_FILE}")
     manifest = parse_manifest(raw)
-    prompt = (folder / _PROMPT_FILE).read_text(encoding="utf-8")
+    prompt = (folder / _PROMPT_FILE).read_text(encoding="utf-8-sig")
     return LoadedAgent(manifest=manifest, prompt=prompt, path=str(folder))
 
 

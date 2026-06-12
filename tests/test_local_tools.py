@@ -32,6 +32,8 @@ EXPECTED_ORDER = [
     "list_recent_outcomes",
     "list_agents_state",
     "log_note",
+    "recall_memories",
+    "remember_fact",
 ]
 
 

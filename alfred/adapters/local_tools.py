@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from alfred.domain.memory import MemoryService
 from alfred.domain.schemas import Collections, Observation, Outcome, Plan, UserProfile
 from alfred.errors import ToolNotFoundError
 from alfred.ports.clock import ClockPort
@@ -82,6 +83,44 @@ _LOG_NOTE_PARAMS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_REMEMBER_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The fact to file, stated plainly and completely.",
+        },
+        "kind": {
+            "type": "string",
+            "enum": ["fact", "preference", "person", "deadline", "context"],
+            "default": "fact",
+            "description": "What kind of fact this is.",
+        },
+    },
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+_RECALL_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Topic or keywords to search the owner's memories for.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 5,
+        },
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
 
 class _NoArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -107,6 +146,20 @@ class _LogNoteArgs(BaseModel):
     text: str = Field(min_length=1)
 
 
+class _RememberArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    kind: str = "fact"
+
+
+class _RecallArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    limit: int = Field(default=5, ge=1, le=10)
+
+
 def _without_key(doc: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in doc.items() if k != "_key"}
 
@@ -117,9 +170,16 @@ _Handler = Callable[[Any], Awaitable[Any]]
 class LocalToolAdapter:
     """ToolPort implementation of ALFRED's built-in tools."""
 
-    def __init__(self, store: StorePort, clock: ClockPort) -> None:
+    def __init__(
+        self,
+        store: StorePort,
+        clock: ClockPort,
+        memory: MemoryService | None = None,
+    ) -> None:
         self._store = store
         self._clock = clock
+        # Injected by the composition root; the adapter only calls it.
+        self._memory = memory or MemoryService(store, clock)
         # Insertion order here is the stable order list_tools() returns.
         self._tools: dict[str, tuple[ToolSpec, type[BaseModel], _Handler]] = {
             "current_time": (
@@ -185,6 +245,36 @@ class LocalToolAdapter:
                 ),
                 _LogNoteArgs,
                 self._log_note,
+            ),
+            "recall_memories": (
+                ToolSpec(
+                    name="recall_memories",
+                    description=(
+                        "Search the owner's filed memories by topic. Use before "
+                        "advising on anything that may have history (injuries, "
+                        "deadlines, preferences, people)."
+                    ),
+                    parameters=_RECALL_PARAMS,
+                    tier=CapabilityTier.READ_ONLY,
+                    source="local",
+                ),
+                _RecallArgs,
+                self._recall_memories,
+            ),
+            "remember_fact": (
+                ToolSpec(
+                    name="remember_fact",
+                    description=(
+                        "File a durable fact about the owner's life so every "
+                        "agent can recall it later. Only for things worth "
+                        "keeping; the owner can list and forget memories."
+                    ),
+                    parameters=_REMEMBER_PARAMS,
+                    tier=CapabilityTier.REVERSIBLE_WRITE,
+                    source="local",
+                ),
+                _RememberArgs,
+                self._remember_fact,
             ),
         }
 
@@ -267,3 +357,21 @@ class LocalToolAdapter:
             Collections.OBSERVATIONS, observation.model_dump(mode="json")
         )
         return {"key": key}
+
+    async def _recall_memories(self, args: _RecallArgs) -> list[dict[str, Any]]:
+        memories = await self._memory.recall(args.query, limit=args.limit)
+        return [
+            {
+                "id": memory.id,
+                "kind": memory.kind,
+                "text": memory.text,
+                "when": memory.at.date().isoformat() if memory.at else None,
+            }
+            for memory in memories
+        ]
+
+    async def _remember_fact(self, args: _RememberArgs) -> dict[str, str]:
+        memory = await self._memory.remember(
+            args.text, source="tool", kind=args.kind
+        )
+        return {"id": memory.id, "filed": memory.text}

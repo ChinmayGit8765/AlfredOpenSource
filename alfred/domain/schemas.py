@@ -34,6 +34,7 @@ class Collections:
 
     PLANS = "plans"
     SCHEDULES = "schedules"  # Conductor-reconciled weekly schedules
+    MEMORIES = "memories"  # explicit recallable facts about the owner's life
     OUTCOMES = "outcomes"
     OBSERVATIONS = "observations"
     PROFILE = "profile"  # keyed; current profile lives at key "current"
@@ -270,6 +271,23 @@ class Proposal(BaseModel):
 # ---------------------------------------------------------------------------
 # User model
 # ---------------------------------------------------------------------------
+
+
+class Memory(BaseModel):
+    """One explicit, recallable fact in the owner's life.
+
+    Distinct from Observation: observations are the adaptation stream
+    (adherence, trends); memories are reference material the owner or an
+    agent deliberately filed and expects ALFRED to bring back up at the
+    right moment ("physio said no overhead pressing until March").
+    """
+
+    id: str = Field(default_factory=new_id)
+    text: str
+    source: str = "owner"  # "owner", an agent name, or "reflection"
+    kind: Literal["fact", "preference", "person", "deadline", "context"] = "fact"
+    tags: list[str] = Field(default_factory=list)
+    at: datetime | None = None
 
 
 class Observation(BaseModel):

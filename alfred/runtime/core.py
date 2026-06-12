@@ -20,6 +20,7 @@ from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.feedback import adherence_signal, parse_outcome_report
 from alfred.domain.governance import PendingActions, Proposals, audit
+from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry, LoadedAgent
 from alfred.domain.routing import route
@@ -58,6 +59,9 @@ _HELP_TEXT = "\n".join(
         "- proposals: list pending self-change proposals",
         "- approve <id> [confirm-safety] / reject <id>: rule on a proposal",
         "- reflect: run a strategy review now",
+        "- remember <fact>: file something ALFRED should bring up later",
+        "- recall <topic> (or 'what do you know about <topic>'): search memories",
+        "- memories: recent memories; forget <id> deletes one",
         "- new agent <goal> (or optimise <goal>): build a new agent",
         "- alfred stop: shut down cleanly",
         "Anything else routes to your agents by their trigger words.",
@@ -94,6 +98,7 @@ class AlfredCore:
         transport: TransportPort,
         config: AlfredConfig,
         agents_dir: Path,
+        memory: MemoryService | None = None,
     ) -> None:
         self._registry = registry
         self._executor = executor
@@ -109,6 +114,7 @@ class AlfredCore:
         self._transport = transport
         self._config = config
         self._agents_dir = Path(agents_dir)
+        self._memory = memory or MemoryService(store, clock)
         self.stop_requested = False
         # Freshest channel the owner spoke on; scheduled output goes there
         # when no channel is configured. In-memory on purpose: a stale "cli"
@@ -235,6 +241,29 @@ class AlfredCore:
             await self._reject_proposal(channel, parts[1])
             return True
 
+        if head == "remember" and len(parts) >= 2:
+            fact = text.split(maxsplit=1)[1].strip()
+            memory = await self._memory.remember(fact, source="owner")
+            await self._send(
+                channel,
+                f"Filed ({memory.id}). I will bring it up whenever it matters; "
+                f"say 'forget {memory.id}' to delete it.",
+            )
+            return True
+        recall_query = self._recall_query(text, lowered, parts)
+        if recall_query is not None:
+            await self._send(channel, await self._render_recall(recall_query))
+            return True
+        if lowered == "memories":
+            await self._send(channel, await self._render_memories())
+            return True
+        if head == "forget" and len(parts) == 2:
+            if await self._memory.forget(parts[1]):
+                await self._send(channel, f"Forgotten: {parts[1]}. Gone from the record.")
+            else:
+                await self._send(channel, f"I have no memory with id {parts[1]}.")
+            return True
+
         goal = ""
         if lowered.startswith("new agent "):
             goal = text[len("new agent") :].strip()
@@ -254,6 +283,44 @@ class AlfredCore:
             return True
 
         return False
+
+    @staticmethod
+    def _recall_query(text: str, lowered: str, parts: list[str]) -> str | None:
+        """Extract a memory query from command or natural phrasing; None if absent."""
+        if parts and parts[0].lower() == "recall" and len(parts) >= 2:
+            return text.split(maxsplit=1)[1].strip()
+        for prefix in (
+            "what do you know about ",
+            "what did i say about ",
+            "what did i tell you about ",
+        ):
+            if lowered.startswith(prefix):
+                return text[len(prefix) :].strip().rstrip("?")
+        return None
+
+    async def _render_recall(self, query: str) -> str:
+        memories = await self._memory.recall(query, limit=5)
+        if not memories:
+            return (
+                f"Nothing filed about '{query}' yet. Say 'remember <fact>' "
+                "and I will keep it."
+            )
+        lines = [f"What I have about '{query}':"]
+        for memory in memories:
+            when = f" ({memory.at.date().isoformat()})" if memory.at else ""
+            lines.append(f"- {memory.text}{when} [{memory.id}]")
+        return "\n".join(lines)
+
+    async def _render_memories(self) -> str:
+        memories = await self._memory.recent(limit=10)
+        if not memories:
+            return "No memories filed yet. Say 'remember <fact>' to start."
+        lines = ["Recent memories (newest first):"]
+        for memory in memories:
+            when = f" ({memory.at.date().isoformat()})" if memory.at else ""
+            lines.append(f"- [{memory.kind}] {memory.text}{when} [{memory.id}]")
+        lines.append("Say 'forget <id>' to delete one.")
+        return "\n".join(lines)
 
     async def _confirm_action(self, channel: str, action_id: str) -> None:
         action = await self._pending.get(action_id)
@@ -684,7 +751,7 @@ class AlfredCore:
         sends into a transport that cannot deliver them.
         """
         if self._config.discord.channel_id:
-            return str(self._config.discord.channel_id)
+            return f"discord:{self._config.discord.channel_id}"
         return self._last_channel
 
     async def _send_scheduled(self, channel: str | None, text: str) -> None:

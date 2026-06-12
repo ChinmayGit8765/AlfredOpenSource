@@ -58,6 +58,38 @@ discord:
   # the owner writes in. Default: null
   channel_id: null
 
+# Telegram transport: the same brain in your pocket. Make a bot with
+# @BotFather, put its token in the environment, message the bot once,
+# and get your numeric user id from @userinfobot.
+telegram:
+  # Default: false
+  enabled: false
+
+  # Name of the environment variable holding the bot token.
+  # Default: ALFRED_TELEGRAM_TOKEN
+  token_env: ALFRED_TELEGRAM_TOKEN
+
+  # Your Telegram user id. Only this user is obeyed. Default: 0
+  owner_id: 0
+
+# Local HTTP API: lets iOS Shortcuts, Tasker, curl, or any script reach
+# ALFRED. POST /message with {"text": "..."} and a Bearer token; the
+# reply comes back in the response. Refuses to start without a token.
+http:
+  # Default: false
+  enabled: false
+
+  # Bind address. 127.0.0.1 means this machine only; exposing further is
+  # a deliberate choice you make with your eyes open. Default: 127.0.0.1
+  host: "127.0.0.1"
+
+  # Default: 8765
+  port: 8765
+
+  # Environment variable holding the bearer token callers must present.
+  # Default: ALFRED_HTTP_TOKEN
+  token_env: ALFRED_HTTP_TOKEN
+
 # Proactive scheduler: weekly plans, check-ins, periodic reflection.
 heartbeat:
   # Master switch for proactive behaviour. With this off ALFRED only

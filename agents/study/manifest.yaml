@@ -28,4 +28,6 @@ allowed_tools:
   - list_plans
   - list_recent_outcomes
   - log_note
+  - recall_memories
+  - remember_fact
 capacity_cost: 6

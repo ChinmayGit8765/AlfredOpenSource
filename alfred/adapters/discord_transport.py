@@ -21,35 +21,13 @@ from alfred.domain.schemas import InboundMessage
 from alfred.errors import TransportError
 from alfred.ports.transport import OutboundMessage
 
+from alfred.adapters.textutil import chunk_text
+
 logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 
-
-def chunk_text(text: str, limit: int = 2000) -> list[str]:
-    """Split text into pieces of at most limit chars, preferring newlines.
-
-    Pure helper so chunking stays testable without a gateway. A cut at a
-    newline drops that newline (it becomes the message boundary); a single
-    overlong line is hard-split at the limit. Empty text yields no chunks
-    because Discord rejects empty messages.
-    """
-    if limit < 1:
-        raise ValueError("limit must be positive")
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > limit:
-        window = remaining[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            chunks.append(remaining[:limit])
-            remaining = remaining[limit:]
-        else:
-            chunks.append(remaining[:cut])
-            remaining = remaining[cut + 1 :]
-    if remaining:
-        chunks.append(remaining)
-    return chunks
+__all__ = ["DiscordTransportAdapter", "DISCORD_MESSAGE_LIMIT", "chunk_text"]
 
 
 class DiscordTransportAdapter:
@@ -97,7 +75,7 @@ class DiscordTransportAdapter:
         if self._config.channel_id is not None and channel_id != self._config.channel_id:
             return
         message = InboundMessage(
-            channel=str(channel_id),
+            channel=f"discord:{channel_id}",
             author=str(author_id),
             text=text,
             at=created_at,
@@ -123,7 +101,9 @@ class DiscordTransportAdapter:
 
     async def _resolve_channel(self, raw: str) -> discord.abc.Messageable:
         try:
-            channel_id = int(raw)
+            # Channels are namespaced "discord:<id>"; bare numeric ids are
+            # accepted too for configs written before namespacing existed.
+            channel_id = int(raw.removeprefix("discord:"))
         except ValueError as exc:
             raise TransportError(f"invalid Discord channel id: {raw!r}") from exc
         channel = self._client.get_channel(channel_id)

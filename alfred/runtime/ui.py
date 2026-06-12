@@ -107,10 +107,15 @@ def print_banner(subtitle: str = "") -> None:
 
 
 def print_reply(text: str) -> None:
-    """One message from ALFRED: a gold-edged panel with markdown inside."""
+    """One message from ALFRED: a gold-edged panel with markdown inside.
+
+    Legacy consoles get plain text: rich's markdown bullets and rules use
+    glyphs an old codepage cannot encode.
+    """
+    body = Markdown(text) if FANCY else Text(text)
     console.print(
         Panel(
-            Markdown(text),
+            body,
             title="ALFRED",
             title_align="left",
             border_style="accent",

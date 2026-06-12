@@ -22,9 +22,13 @@
 # deliberate: safe by default. Classifying a tool can relax its gate, but
 # nothing can bypass the gate entirely.
 #
-# Example: a calendar server launched over stdio. Adjust command, args,
-# env, and the tool names to match the actual server you install.
+# RECIPES. Each block below is a starting point for a real connector;
+# adjust command, args, env, and tool names to the server you install.
+# The MCP ecosystem grows weekly (https://github.com/modelcontextprotocol/servers
+# and the community lists); every new server is a new ALFRED capability
+# with zero new ALFRED code. Copy a block into mcp_servers: in alfred.yaml.
 #
+# --- Calendar: the canonical first connector -------------------------------
 # mcp_servers:
 #   - name: calendar
 #     command: npx
@@ -38,5 +42,60 @@
 #       create_event: reversible_write
 #       update_event: reversible_write
 #       delete_event: destructive
-#       # any tool the server exposes that is not listed here is treated
-#       # as destructive and will always require confirmation.
+#
+# --- Filesystem: notes, documents, training logs ---------------------------
+#   - name: files
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/you/notes"]
+#     tool_tiers:
+#       read_file: read_only
+#       read_text_file: read_only
+#       list_directory: read_only
+#       search_files: read_only
+#       write_file: reversible_write
+#       edit_file: reversible_write
+#       move_file: destructive
+#
+# --- Obsidian / markdown vault: the owner's second brain --------------------
+#   - name: vault
+#     command: npx
+#     args: ["-y", "mcp-obsidian", "C:/Users/you/vault"]
+#     tool_tiers:
+#       read_notes: read_only
+#       search_notes: read_only
+#       write_note: reversible_write
+#
+# --- GitHub: the build agent's eyes on real projects ------------------------
+#   - name: github
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-github"]
+#     env:
+#       GITHUB_PERSONAL_ACCESS_TOKEN: "set-via-your-shell-not-this-file"
+#     tool_tiers:
+#       search_repositories: read_only
+#       get_issue: read_only
+#       list_issues: read_only
+#       create_issue: reversible_write
+#       # merges, deletes, force pushes: leave unlisted = destructive.
+#
+# --- Home Assistant: lights, climate, presence ------------------------------
+#   - name: home
+#     command: uvx
+#     args: ["mcp-server-home-assistant"]
+#     env:
+#       HA_URL: "http://127.0.0.1:8123"
+#       HA_TOKEN: "set-via-your-shell-not-this-file"
+#     tool_tiers:
+#       get_state: read_only
+#       call_service: reversible_write
+#
+# --- Health / wearables (when a server exists for yours) --------------------
+#   - name: health
+#     command: uvx
+#     args: ["example-health-mcp"]
+#     tool_tiers:
+#       get_sleep: read_only
+#       get_recovery: read_only
+#       get_workouts: read_only
+#       # read-only by nature: ALFRED reads your recovery, it does not
+#       # write your biometrics.

@@ -86,7 +86,8 @@ async def test_owner_message_reaches_handler_with_correct_fields() -> None:
 
     assert len(handler.messages) == 1
     message = handler.messages[0]
-    assert message.channel == str(CHANNEL)
+    # Channels are namespaced so multiple transports can share one core.
+    assert message.channel == f"discord:{CHANNEL}"
     assert message.author == str(OWNER)
     assert message.text == "plan my week"
     assert message.at == NOW
