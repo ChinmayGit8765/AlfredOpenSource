@@ -27,6 +27,7 @@ def stats(
     missed: int = 0,
     skipped: int = 0,
     consecutive: int = 0,
+    consecutive_dones: int = 0,
 ) -> AdherenceStats:
     return AdherenceStats(
         done=done,
@@ -34,6 +35,7 @@ def stats(
         missed=missed,
         skipped=skipped,
         consecutive_misses=consecutive,
+        consecutive_dones=consecutive_dones,
     )
 
 
@@ -135,19 +137,26 @@ def test_established_stays_below_maintenance_boundaries() -> None:
 
 
 def test_lapsing_recovers_to_forming() -> None:
-    # Misses cleared and rate at least 0.5: rebuild gently from FORMING.
-    assert next_lifecycle(Lifecycle.LAPSING, stats(done=3, missed=3)) is Lifecycle.FORMING
-    assert next_lifecycle(Lifecycle.LAPSING, stats(done=6, missed=2)) is Lifecycle.FORMING
+    # Three real completions in a row clear a lapse: rebuild from FORMING.
+    assert (
+        next_lifecycle(Lifecycle.LAPSING, stats(done=3, missed=3, consecutive_dones=3))
+        is Lifecycle.FORMING
+    )
+    assert (
+        next_lifecycle(Lifecycle.LAPSING, stats(done=6, missed=2, consecutive_dones=4))
+        is Lifecycle.FORMING
+    )
 
 
 def test_lapsing_stays_put_when_unsure() -> None:
-    # Still missing: not recovered.
+    # Two consecutive dones are not yet a recovery; the third clears it.
     assert (
-        next_lifecycle(Lifecycle.LAPSING, stats(done=3, missed=3, consecutive=1))
+        next_lifecycle(Lifecycle.LAPSING, stats(done=5, missed=3, consecutive_dones=2))
         is Lifecycle.LAPSING
     )
-    # No current misses but the rate is still under 0.5.
-    assert next_lifecycle(Lifecycle.LAPSING, stats(done=2, missed=3)) is Lifecycle.LAPSING
+    # A good long-run rate without a current done streak is not a recovery
+    # either: the lapse is about now, not history.
+    assert next_lifecycle(Lifecycle.LAPSING, stats(done=6, missed=2)) is Lifecycle.LAPSING
 
 
 @pytest.mark.parametrize(

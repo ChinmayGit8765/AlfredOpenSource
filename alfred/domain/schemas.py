@@ -33,6 +33,7 @@ class Collections:
     """Canonical collection names. Always reference these, never bare strings."""
 
     PLANS = "plans"
+    SCHEDULES = "schedules"  # Conductor-reconciled weekly schedules
     OUTCOMES = "outcomes"
     OBSERVATIONS = "observations"
     PROFILE = "profile"  # keyed; current profile lives at key "current"
@@ -289,6 +290,7 @@ class AdherenceStats(BaseModel):
     missed: int = 0
     skipped: int = 0
     consecutive_misses: int = 0
+    consecutive_dones: int = 0  # recovery signal; a lapse needs 3 to clear
 
     @property
     def total(self) -> int:
@@ -296,10 +298,15 @@ class AdherenceStats(BaseModel):
 
     @property
     def rate(self) -> float:
-        """Completion rate in [0, 1]; partial counts half."""
-        if self.total == 0:
+        """Completion rate in [0, 1]; partial counts half.
+
+        Skips are excluded from the denominator: skipping is a deliberate
+        choice, not a lapse, so it never dilutes the rate.
+        """
+        engaged = self.done + self.partial + self.missed
+        if engaged == 0:
             return 0.0
-        return (self.done + 0.5 * self.partial) / self.total
+        return (self.done + 0.5 * self.partial) / engaged
 
 
 class UserProfile(BaseModel):

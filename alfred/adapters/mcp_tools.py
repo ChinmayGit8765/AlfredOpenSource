@@ -13,6 +13,7 @@ importing this module must always succeed.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Mapping, Sequence
@@ -28,6 +29,11 @@ _INSTALL_HINT = (
     "MCP support requires the optional mcp dependency; "
     'install with: uv pip install "alfred[mcp]"'
 )
+
+# A hung MCP server must never block startup, an agent run, or the
+# heartbeat indefinitely: every session operation gets a deadline.
+CONNECT_TIMEOUT_S = 20.0
+CALL_TIMEOUT_S = 60.0
 
 
 def _tier_for(config: McpServerConfig, tool: str, qualified: str) -> CapabilityTier:
@@ -74,31 +80,44 @@ class McpToolAdapter:
         specs: list[ToolSpec] = []
         for server in servers:
             try:
-                read, write = await stack.enter_async_context(
-                    stdio_client(
-                        StdioServerParameters(
-                            command=server.command,
-                            args=server.args,
-                            env=server.env or None,
+                async with asyncio.timeout(CONNECT_TIMEOUT_S):
+                    read, write = await stack.enter_async_context(
+                        stdio_client(
+                            StdioServerParameters(
+                                command=server.command,
+                                args=server.args,
+                                env=server.env or None,
+                            )
                         )
                     )
-                )
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                listed = await session.list_tools()
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                    tools = await cls._list_all_tools(session)
             except Exception as exc:
-                # A broken connector must not take ALFRED down: skip it,
-                # keep the rest.
+                # A broken or hanging connector must not take ALFRED down:
+                # skip it, keep the rest.
                 logger.warning(
                     "MCP server '%s' failed to start, skipping: %s", server.name, exc
                 )
                 continue
             sessions[server.name] = session
-            specs.extend(cls._specs_for_server(server, listed.tools))
+            specs.extend(cls._specs_for_server(server, tools))
             logger.info(
-                "connected MCP server '%s' with %d tools", server.name, len(listed.tools)
+                "connected MCP server '%s' with %d tools", server.name, len(tools)
             )
         return cls(sessions=sessions, specs=specs, exit_stack=stack)
+
+    @staticmethod
+    async def _list_all_tools(session: Any) -> list[Any]:
+        """Follow list_tools pagination; one page is the common case."""
+        tools: list[Any] = []
+        cursor: str | None = None
+        while True:
+            listed = await session.list_tools(cursor)
+            tools.extend(listed.tools)
+            cursor = getattr(listed, "nextCursor", None)
+            if not cursor:
+                return tools
 
     @staticmethod
     def _specs_for_server(config: McpServerConfig, tools: Sequence[Any]) -> list[ToolSpec]:
@@ -128,15 +147,25 @@ class McpToolAdapter:
         if session is None:
             raise ToolNotFoundError(f"no connected MCP server for tool: {name}")
         try:
-            result = await session.call_tool(tool, dict(args))
+            async with asyncio.timeout(CALL_TIMEOUT_S):
+                result = await session.call_tool(tool, dict(args))
+        except TimeoutError:
+            logger.warning("MCP tool %s timed out after %.0fs", name, CALL_TIMEOUT_S)
+            return ToolResult(
+                ok=False, error=f"{name} timed out after {CALL_TIMEOUT_S:.0f}s"
+            )
         except Exception as exc:
             logger.warning("MCP tool %s failed: %s", name, exc)
             return ToolResult(ok=False, error=f"{name} failed: {exc}")
-        text = "\n".join(
-            block.text
-            for block in result.content
-            if getattr(block, "type", None) == "text"
-        )
+        parts: list[str] = []
+        for block in result.content:
+            if getattr(block, "type", None) == "text":
+                parts.append(block.text)
+            elif hasattr(block, "model_dump_json"):
+                # Non-text content (images, resources) is surfaced as its
+                # JSON form rather than silently dropped.
+                parts.append(block.model_dump_json())
+        text = "\n".join(parts)
         if result.isError:
             return ToolResult(
                 ok=False,

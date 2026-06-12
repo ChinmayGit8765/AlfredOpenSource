@@ -9,6 +9,7 @@ no information about itself to strangers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -61,6 +62,10 @@ class DiscordTransportAdapter:
     ) -> None:
         self._config = config
         self._handler = handler
+        # discord.py runs each on_message in its own task; the core's
+        # handler mutates shared state (profile, sessions) and is not safe
+        # to interleave, so inbound messages are serialized here.
+        self._handler_lock = asyncio.Lock()
         intents = discord.Intents.default()
         intents.message_content = True
         self._client = discord.Client(intents=intents)
@@ -99,7 +104,8 @@ class DiscordTransportAdapter:
             provenance="owner",
         )
         try:
-            await self._handler(message)
+            async with self._handler_lock:
+                await self._handler(message)
         except Exception:
             # The gateway must survive any core failure.
             logger.exception("inbound handler failed for message %s", message.id)

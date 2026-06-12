@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import json
 import logging
+import queue
+import threading
 from pathlib import Path
 
 from alfred.adapters.discord_transport import DiscordTransportAdapter
@@ -75,6 +77,36 @@ class LoopbackTransport:
         print(f"ALFRED> {message.text}")
 
 
+class _StdinReader:
+    """Prompted line reads on a daemon thread.
+
+    A plain asyncio.to_thread(input, ...) leaves a non-daemon executor
+    thread blocked in input() at shutdown, so Ctrl-C appears to hang until
+    the user presses Enter. A daemon thread never holds the process open.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._lines: asyncio.Queue[str | None] = asyncio.Queue()
+        self._prompts: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True, name="alfred-stdin").start()
+
+    def _pump(self) -> None:
+        while True:
+            prompt = self._prompts.get()
+            try:
+                line = input(prompt)
+            except EOFError:
+                self._loop.call_soon_threadsafe(self._lines.put_nowait, None)
+                return
+            self._loop.call_soon_threadsafe(self._lines.put_nowait, line)
+
+    async def read(self, prompt: str) -> str | None:
+        """Return the next line, or None on EOF."""
+        self._prompts.put(prompt)
+        return await self._lines.get()
+
+
 async def _probe_ollama(config: AlfredConfig) -> str:
     """Return a usable model name or raise; bounded so init never hangs."""
     adapter = OllamaModelAdapter(config.llm)
@@ -130,14 +162,17 @@ async def _cmd_init(config_path: str | None) -> int:
 async def _cmd_chat(fake: bool, config_path: str | None) -> int:
     config = load_config(config_path)
     system = build_system(config, fake=fake, transport=LoopbackTransport())
+    if not fake:
+        # Chat and run expose the same tool surface for the same agents.
+        await connect_mcp(system)
     names = ", ".join(a.manifest.name for a in system.registry.active()) or "none"
     mode = " (dry-run mode)" if fake else ""
     print(f"ALFRED chat{mode}. Active agents: {names}. Empty line or 'exit' quits.")
+    reader = _StdinReader()
     try:
         while True:
-            try:
-                line = await asyncio.to_thread(input, "you> ")
-            except EOFError:
+            line = await reader.read("you> ")
+            if line is None:
                 break
             # Piped input on Windows can carry a UTF-8 BOM; strip it.
             for mark in _BOM_MARKS:
@@ -170,19 +205,53 @@ async def _cmd_run(config_path: str | None) -> int:
     config.llm.name = chosen
     print(f"Model ready: {chosen}")
 
+    if config.discord.owner_id == 0:
+        print(
+            "WARNING: discord.owner_id is 0 (the default), so EVERY message "
+            "will be ignored. Set your Discord user id in config/alfred.yaml."
+        )
+
     await connect_mcp(system)
 
     discord = DiscordTransportAdapter(config.discord, system.core.handle_inbound)
     if isinstance(system.transport, SwitchableTransport):
         system.transport.inner = discord
 
+    async def watch_stop() -> None:
+        # The owner's kill switch: "alfred stop" in chat sets the flag and
+        # this watcher brings the whole service down.
+        while not system.core.stop_requested:
+            await asyncio.sleep(1)
+
     tasks = [
         asyncio.create_task(discord.start(), name="discord"),
-        asyncio.create_task(system.heartbeat.run_forever(), name="heartbeat"),
+        asyncio.create_task(watch_stop(), name="stop-watch"),
     ]
-    print("ALFRED is running. Ctrl-C to stop.")
+    if config.heartbeat.enabled:
+        tasks.append(
+            asyncio.create_task(system.heartbeat.run_forever(), name="heartbeat")
+        )
+    else:
+        print("Heartbeat disabled in config: ALFRED will only react, never initiate.")
+
+    print("ALFRED is running. Ctrl-C (or 'alfred stop' in chat) to stop.")
+    exit_code = 0
     try:
-        await asyncio.gather(*tasks)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            exc = task.exception()
+            if exc is None:
+                continue
+            name = type(exc).__name__
+            if name == "LoginFailure":
+                print(
+                    "Discord rejected the bot token. Check the "
+                    f"{config.discord.token_env} environment variable."
+                )
+            else:
+                print(f"Service task {task.get_name()!r} failed ({name}): {exc}")
+            logger.error("service task %s failed: %s", task.get_name(), exc)
+            exit_code = 1
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
@@ -192,7 +261,7 @@ async def _cmd_run(config_path: str | None) -> int:
         await _close_quietly(discord)
         await _shutdown(system)
         print("Stopped.")
-    return 0
+    return exit_code
 
 
 async def _cmd_agents_list(config_path: str | None) -> int:

@@ -257,5 +257,6 @@ async def test_audit_trail_records_expected_events_in_order():
         "tool_executed",
         "tool_gated",
         "tool_denied",
+        "pending_action_resolved",
         "tool_executed",
     ]

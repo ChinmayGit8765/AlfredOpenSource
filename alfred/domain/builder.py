@@ -49,6 +49,13 @@ _APPROVALS = frozenset(
 )
 _REJECTIONS = frozenset({"no", "n", "nope", "cancel", "stop", "reject", "drop it"})
 
+# Explicit cancellations work at EVERY stage, so a session can never wedge
+# the conversation. Bare "no" stays approval-stage-only: during elicitation
+# it is usually an answer to a question, not a cancellation.
+_CANCELS = frozenset(
+    {"cancel", "stop", "drop it", "abandon", "never mind", "nevermind", "forget it", "quit"}
+)
+
 _PROMPT_REQUIRED = ("identity", "scope", "smallest", "anchor", "tone", "output")
 
 
@@ -247,6 +254,19 @@ class AgentBuilder:
             raise AlfredError(f"unknown builder session: {session_id}")
         session.transcript.append({"role": "owner", "text": owner_message})
 
+        if (
+            _normalise(owner_message) in _CANCELS
+            and session.stage not in (BuilderStage.DONE, BuilderStage.ABANDONED)
+        ):
+            session.stage = BuilderStage.ABANDONED
+            message = (
+                "Dropped, no harm done. Deciding not to build something is a "
+                "good outcome too. Come back to it whenever it earns its place."
+            )
+            session.transcript.append({"role": "alfred", "text": message})
+            await self._save(session)
+            return session, message
+
         match session.stage:
             case BuilderStage.ELICITING:
                 message = await self._step_eliciting(session)
@@ -293,6 +313,22 @@ class AgentBuilder:
         if not open_sessions:
             return None
         return max(open_sessions, key=lambda s: s.updated_at or s.created_at or _EPOCH)
+
+    async def abandon_active(self) -> str | None:
+        """Abandon the most recent open session; returns its id when one existed.
+
+        Used when the owner starts a fresh build while one is open: the old
+        session must not resurrect later and intercept messages.
+        """
+        session = await self.active_session()
+        if session is None:
+            return None
+        session.stage = BuilderStage.ABANDONED
+        session.transcript.append(
+            {"role": "alfred", "text": "(superseded by a new building session)"}
+        )
+        await self._save(session)
+        return session.id
 
     # --- stage handlers -----------------------------------------------------
 
@@ -361,7 +397,9 @@ class AgentBuilder:
             session.stage = BuilderStage.DESIGNING
             return "I lost the draft blueprint; tell me to design again."
 
-        forced = "force" in owner_message.lower()
+        # The override must be the whole message: "force" deliberately typed,
+        # never a substring of something like "don't force it".
+        forced = _normalise(owner_message) == "force"
         wip = check_wip(registry)
         profile = await self._user_model.get_profile()
         active_cost = sum(a.manifest.capacity_cost for a in registry.active())
@@ -429,7 +467,10 @@ class AgentBuilder:
             ),
         )
         session.blueprint = self._enforce(revised, session, registry)
-        return "Revised. " + self._render_blueprint(session)
+        # A revision can change capacity_cost, so it goes back through the
+        # honest capacity look instead of straight to approval.
+        session.stage = BuilderStage.CAPACITY_CHECK
+        return "Revised. " + await self._step_capacity(session, "", registry)
 
     # --- helpers ------------------------------------------------------------
 

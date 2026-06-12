@@ -17,7 +17,18 @@ from alfred.domain.schemas import AdherenceStats, OutcomeStatus
 _KEYWORDS: dict[OutcomeStatus, tuple[str, ...]] = {
     OutcomeStatus.DONE: ("done", "did it", "completed", "finished", "nailed it", "yes"),
     OutcomeStatus.PARTIAL: ("partial", "partially", "half", "some of it", "mostly"),
-    OutcomeStatus.MISSED: ("missed", "didn't", "did not", "failed", "no"),
+    OutcomeStatus.MISSED: (
+        "missed",
+        "didn't",
+        "did not",
+        "failed",
+        "no",
+        "not",
+        "never",
+        "haven't",
+        "couldn't",
+        "won't",
+    ),
     OutcomeStatus.SKIPPED: ("skip", "skipped", "rest day", "pass"),
 }
 
@@ -32,7 +43,9 @@ def parse_outcome_report(text: str) -> OutcomeStatus | None:
 
     Keywords match case-insensitively on word boundaries. When keywords
     from more than one status appear ("did half, then skipped") the report
-    is ambiguous and the caller must ask, not guess.
+    is ambiguous and the caller must ask, not guess. Negators ("not",
+    "never", "haven't") count as MISSED keywords, so a negated completion
+    like "not done" reads as ambiguous rather than DONE.
     """
     lowered = text.lower().replace("’", "'")
     matched = [status for status, pattern in _PATTERNS.items() if pattern.search(lowered)]

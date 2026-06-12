@@ -119,6 +119,18 @@ class PendingActions:
             update={"status": "confirmed" if approved else "rejected"}
         )
         await self._save(resolved)
+        # Refusals matter as much as executions in the audit trail: the
+        # record must show gates closing, not only gates opening.
+        await audit(
+            self._store,
+            self._clock,
+            "pending_action_resolved",
+            action_id=resolved.id,
+            agent=resolved.agent,
+            tool=resolved.call.tool,
+            tier=resolved.tier.value,
+            approved=approved,
+        )
         return resolved
 
     def _is_stale(self, action: PendingAction) -> bool:
@@ -129,6 +141,15 @@ class PendingActions:
     async def _expire(self, action: PendingAction) -> None:
         expired = action.model_copy(update={"status": "expired"})
         await self._save(expired)
+        await audit(
+            self._store,
+            self._clock,
+            "pending_action_expired",
+            action_id=expired.id,
+            agent=expired.agent,
+            tool=expired.call.tool,
+            tier=expired.tier.value,
+        )
         logger.info("pending action %s expired after TTL", action.id)
 
     async def _save(self, action: PendingAction) -> None:
@@ -152,6 +173,15 @@ class Proposals:
             update={"status": "pending", "created_at": self._clock.now()}
         )
         await self._save(stamped)
+        await audit(
+            self._store,
+            self._clock,
+            "proposal_created",
+            proposal_id=stamped.id,
+            kind=stamped.kind.value,
+            agent=stamped.agent,
+            touches_safety=stamped.touches_safety,
+        )
         return stamped
 
     async def list_pending(self) -> list[Proposal]:
@@ -173,6 +203,16 @@ class Proposals:
             update={"status": "approved" if approved else "rejected"}
         )
         await self._save(resolved)
+        await audit(
+            self._store,
+            self._clock,
+            "proposal_resolved",
+            proposal_id=resolved.id,
+            kind=resolved.kind.value,
+            agent=resolved.agent,
+            touches_safety=resolved.touches_safety,
+            approved=approved,
+        )
         return resolved
 
     async def _save(self, proposal: Proposal) -> None:

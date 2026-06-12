@@ -157,9 +157,19 @@ async def test_ensure_model_exact_match_returns_config_name() -> None:
     assert await adapter.ensure_model() == "qwen3:8b"
 
 
-async def test_ensure_model_prefix_match_before_colon() -> None:
-    adapter, _ = make_adapter(StubClient(models=["qwen3:latest"]), name="qwen3")
-    assert await adapter.ensure_model() == "qwen3"
+async def test_ensure_model_prefix_match_resolves_to_available_name() -> None:
+    # A bare configured name resolves to the exact pulled tag: chatting with
+    # "qwen3" would make Ollama look for "qwen3:latest", which may not exist.
+    adapter, _ = make_adapter(StubClient(models=["qwen3:8b"]), name="qwen3")
+    assert await adapter.ensure_model() == "qwen3:8b"
+
+
+async def test_complete_defaults_to_resolved_model_after_ensure() -> None:
+    client = StubClient(models=["qwen3:8b"])
+    adapter, _ = make_adapter(client, name="qwen3")
+    await adapter.ensure_model()
+    await adapter.complete(MESSAGES)
+    assert client.chat_kwargs["model"] == "qwen3:8b"
 
 
 async def test_ensure_model_falls_back_when_primary_missing() -> None:

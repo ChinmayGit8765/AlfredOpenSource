@@ -92,11 +92,23 @@ def _agent_name(plan: Plan) -> str:
 def detect_conflicts(plans: list[Plan], weekly_capacity: int) -> list[Conflict]:
     """Pure conflict detection across concurrent plans.
 
+    Plans are grouped by week_of first: plans for different weeks never
+    contend for the same capacity. Within each week:
     overload_week: total load strictly above weekly_capacity.
     overload_day: load on one weekday strictly above ceil(weekly_capacity/5).
     time_collision: two timed items on the same day with overlapping
     [start, start+duration) windows (missing duration assumed 60 minutes).
     """
+    groups: dict[date | None, list[Plan]] = {}
+    for plan in plans:
+        groups.setdefault(plan.week_of, []).append(plan)
+    conflicts: list[Conflict] = []
+    for week in sorted(groups, key=lambda w: (w is not None, w or date.min)):
+        conflicts.extend(_detect_week_conflicts(groups[week], weekly_capacity))
+    return conflicts
+
+
+def _detect_week_conflicts(plans: list[Plan], weekly_capacity: int) -> list[Conflict]:
     conflicts: list[Conflict] = []
     entries: list[tuple[Plan, PlanItem, str | None]] = [
         (plan, item, _normalize_day(item.day)) for plan in plans for item in plan.items
@@ -252,19 +264,27 @@ class Conductor:
 
         # Backstop: never trust the model's arithmetic or its inventory.
         known_ids = {item.id for plan in plans for item in plan.items}
-        proposed_ids = {item.id for plan in proposed.plans for item in plan.items}
+        proposed_id_list = [
+            item.id for plan in proposed.plans for item in plan.items
+        ]
+        proposed_ids = set(proposed_id_list)
         invented = sorted(proposed_ids - known_ids)
+        duplicated = sorted(
+            {i for i in proposed_ids if proposed_id_list.count(i) > 1}
+        )
         remaining = [
             c
             for c in detect_conflicts(proposed.plans, capacity)
             if c.kind in _OVERLOAD_KINDS
         ]
-        if invented or remaining:
+        if invented or duplicated or remaining:
             reasons: list[str] = []
             if remaining:
                 reasons.append("model resolution still exceeds capacity")
             if invented:
                 reasons.append(f"model invented unknown items: {', '.join(invented)}")
+            if duplicated:
+                reasons.append(f"model duplicated items: {', '.join(duplicated)}")
             logger.warning("conductor: %s; engaging fallback", "; ".join(reasons))
             return self._fallback(plans, capacity, week_of, "; ".join(reasons))
 
@@ -286,15 +306,48 @@ class Conductor:
         """Deterministic pruner: drop lowest-load items until within capacity.
 
         Works on the original plans, never the model output, so invented
-        items can never survive. Most overloaded day first (ties: earliest
-        weekday), lowest-load item first (ties: alphabetical item id).
+        items can never survive. Weeks prune independently. Most overloaded
+        day first (ties: earliest weekday), lowest positive-load item first
+        (ties: alphabetical item id); zero-load items are never dropped
+        because removing them cannot reduce overload.
         """
         daily_cap = _daily_capacity(capacity)
         working = [plan.model_copy(deep=True) for plan in plans]
         adjustments: list[Adjustment] = []
 
+        groups: dict[date | None, list[Plan]] = {}
+        for plan in working:
+            groups.setdefault(plan.week_of, []).append(plan)
+
+        for group in groups.values():
+            self._prune_week(group, capacity, daily_cap, adjustments)
+
+        total = sum(plan.total_load for plan in working)
+        dropped = len(adjustments)
+        return ReconciledSchedule(
+            week_of=week_of,
+            plans=working,
+            adjustments=adjustments,
+            total_load=total,
+            warnings=[
+                f"deterministic fallback engaged: {reason}; "
+                f"dropped {dropped} item(s) to fit capacity {capacity}"
+            ],
+            summary=(
+                f"deterministic fallback dropped {dropped} item(s) to fit "
+                f"weekly capacity {capacity}"
+            ),
+        )
+
+    def _prune_week(
+        self,
+        group: list[Plan],
+        capacity: int,
+        daily_cap: int,
+        adjustments: list[Adjustment],
+    ) -> None:
         while True:
-            items = [(plan, item) for plan in working for item in plan.items]
+            items = [(plan, item) for plan in group for item in plan.items]
             total = sum(item.load for _, item in items)
             day_loads: dict[str, int] = {}
             for _, item in items:
@@ -318,7 +371,14 @@ class Conductor:
             else:
                 candidates = items
 
-            plan, victim = min(candidates, key=lambda pi: (pi[1].load, pi[1].id))
+            droppable = [(plan, item) for plan, item in candidates if item.load > 0]
+            if not droppable:
+                # Cannot happen while overloaded (overload implies positive
+                # load), but a guard beats an infinite loop if it ever does.
+                logger.warning("conductor fallback: no droppable items remain")
+                break
+
+            plan, victim = min(droppable, key=lambda pi: (pi[1].load, pi[1].id))
             for index, item in enumerate(plan.items):
                 if item is victim:
                     del plan.items[index]
@@ -335,20 +395,3 @@ class Conductor:
                     ),
                 )
             )
-
-        total = sum(plan.total_load for plan in working)
-        dropped = len(adjustments)
-        return ReconciledSchedule(
-            week_of=week_of,
-            plans=working,
-            adjustments=adjustments,
-            total_load=total,
-            warnings=[
-                f"deterministic fallback engaged: {reason}; "
-                f"dropped {dropped} item(s) to fit capacity {capacity}"
-            ],
-            summary=(
-                f"deterministic fallback dropped {dropped} item(s) to fit "
-                f"weekly capacity {capacity}"
-            ),
-        )

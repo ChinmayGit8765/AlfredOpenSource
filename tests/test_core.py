@@ -387,10 +387,13 @@ async def test_two_plans_invoke_conductor_and_persist_schedule(tmp_path: Path) -
     assert any("Training plan ready." in t for t in texts)
     assert any("no conflicts" in t for t in texts)
 
-    docs = await world.store.query(Collections.PLANS)
-    conductor_docs = [d for d in docs if d.get("agent") == "conductor"]
-    assert len(conductor_docs) == 1
-    assert len(conductor_docs[0]["plans"]) == 2
+    # The reconciled schedule lives in its own collection, never in PLANS,
+    # where it would pollute every Plan query.
+    schedules = await world.store.query(Collections.SCHEDULES)
+    assert len(schedules) == 1
+    assert len(schedules[0]["plans"]) == 2
+    plan_docs = await world.store.query(Collections.PLANS)
+    assert all("plans" not in d for d in plan_docs)
 
 
 async def test_executor_failure_surfaces_apology(tmp_path: Path) -> None:
@@ -416,7 +419,28 @@ async def test_alfred_stop_sets_flag(tmp_path: Path) -> None:
     assert any("shutting down" in t.lower() for t in sent_texts(world))
 
 
-async def test_run_scheduled_planning_run_replies_to_cli(tmp_path: Path) -> None:
+async def test_run_scheduled_delivers_to_last_owner_channel(tmp_path: Path) -> None:
+    model = FakeModel(
+        [agent_reply("On it."), agent_reply("Scheduled plan delivered.")]
+    )
+    world = make_world(
+        tmp_path, model, [make_agent("training", ["train"], allowed_tools=TRAINING_TOOLS)]
+    )
+
+    # The owner speaks first; scheduled output then follows that channel.
+    await world.core.handle_inbound(inbound("train tomorrow"))
+    world.transport.sent.clear()
+
+    await world.core.run_scheduled(ScheduledTrigger(agent="training", reason="schedule"))
+
+    assert world.transport.sent
+    assert world.transport.sent[0].channel == "cli"
+    assert "Scheduled plan delivered." in world.transport.sent[0].text
+
+
+async def test_run_scheduled_with_no_known_channel_drops_loudly(tmp_path: Path) -> None:
+    # No configured channel and the owner has never messaged: the job still
+    # runs (the plan persists) but nothing is sent into the void.
     model = FakeModel([agent_reply("Scheduled plan delivered.")])
     world = make_world(
         tmp_path, model, [make_agent("training", ["train"], allowed_tools=TRAINING_TOOLS)]
@@ -424,9 +448,7 @@ async def test_run_scheduled_planning_run_replies_to_cli(tmp_path: Path) -> None
 
     await world.core.run_scheduled(ScheduledTrigger(agent="training", reason="schedule"))
 
-    assert world.transport.sent
-    assert world.transport.sent[0].channel == "cli"
-    assert "Scheduled plan delivered." in world.transport.sent[0].text
+    assert world.transport.sent == []
 
 
 async def test_build_system_fake_smoke(tmp_path: Path) -> None:

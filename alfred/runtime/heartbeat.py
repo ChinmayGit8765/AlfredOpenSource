@@ -56,31 +56,74 @@ def in_quiet_hours(now: datetime, spec: str) -> bool:
     return moment >= start or moment < end
 
 
-def _threshold_today(now: datetime, hhmm: str | None) -> datetime | None:
-    if not hhmm:
+def _parse_hhmm(value: str | None) -> time | None:
+    if not value:
         return None
     try:
-        at = time.fromisoformat(hhmm)
+        return time.fromisoformat(value.strip())
     except ValueError:
         return None
-    return now.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
+
+
+def _most_recent_occurrence(schedule: Schedule, now: datetime) -> datetime | None:
+    """Latest scheduled moment at or before now, looking back up to a week.
+
+    Due-ness compares last-run against this occurrence rather than against
+    today's threshold, so a firing deferred past midnight (quiet hours, or
+    ALFRED simply not running) is caught up on the next tick instead of
+    being lost until the schedule next comes around.
+    """
+    at = _parse_hhmm(schedule.time)
+    if at is None:
+        return None
+    wanted = (
+        {d.strip().lower()[:3] for d in schedule.days}
+        if schedule.kind == "weekly"
+        else None
+    )
+    for offset in range(8):
+        day = now - timedelta(days=offset)
+        candidate = day.replace(
+            hour=at.hour, minute=at.minute, second=0, microsecond=0
+        )
+        if candidate > now:
+            continue
+        if wanted is not None and _DAY_NAMES[candidate.weekday()] not in wanted:
+            continue
+        return candidate
+    return None
 
 
 def _schedule_due(schedule: Schedule, now: datetime, last: datetime | None) -> bool:
     if schedule.kind in ("daily", "weekly"):
-        threshold = _threshold_today(now, schedule.time)
-        if threshold is None or now < threshold:
+        occurrence = _most_recent_occurrence(schedule, now)
+        if occurrence is None:
             return False
-        if schedule.kind == "weekly":
-            wanted = {d.strip().lower()[:3] for d in schedule.days}
-            if _DAY_NAMES[now.weekday()] not in wanted:
-                return False
-        return last is None or last < threshold
+        if last is None:
+            # A job with no history fires only for today's slot: catching up
+            # on occurrences from before it was ever tracked would be noise.
+            return occurrence.date() == now.date()
+        return last < occurrence
     if schedule.kind == "interval":
         if not schedule.every_minutes or schedule.every_minutes <= 0:
             return False
         return last is None or now - last >= timedelta(minutes=schedule.every_minutes)
     return False
+
+
+def _schedule_problem(schedule: Schedule) -> str | None:
+    """A human-readable misconfiguration, or None when the schedule can fire."""
+    if schedule.kind in ("daily", "weekly") and _parse_hhmm(schedule.time) is None:
+        return f"{schedule.kind} schedule has a missing or invalid time {schedule.time!r}"
+    if schedule.kind == "weekly":
+        wanted = {d.strip().lower()[:3] for d in schedule.days}
+        if not wanted & set(_DAY_NAMES):
+            return f"weekly schedule has no valid days {schedule.days!r}"
+    if schedule.kind == "interval" and (
+        not schedule.every_minutes or schedule.every_minutes <= 0
+    ):
+        return f"interval schedule has invalid every_minutes {schedule.every_minutes!r}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -113,6 +156,8 @@ class Heartbeat:
         if spec and _parse_quiet(spec) is None:
             # Warn once here instead of every tick; suppression fails open.
             logger.warning("unparsable quiet_hours %r; quiet hours disabled", spec)
+        # One warning per misconfigured schedule, not one per tick.
+        self._warned: set[str] = set()
 
     def _jobs(self) -> list[_Job]:
         # Rebuilt every tick so registry changes take effect immediately.
@@ -120,16 +165,25 @@ class Heartbeat:
         for agent in self._registry.active():
             manifest = agent.manifest
             if manifest.schedule.kind != "none":
-                jobs.append(
-                    _Job(
-                        job_id=f"schedule:{manifest.name}",
-                        agent=manifest.name,
-                        reason="schedule",
-                        due=lambda now, last, s=manifest.schedule: _schedule_due(
-                            s, now, last
-                        ),
+                problem = _schedule_problem(manifest.schedule)
+                if problem is not None:
+                    key = f"{manifest.name}:{problem}"
+                    if key not in self._warned:
+                        self._warned.add(key)
+                        logger.warning(
+                            "agent %s will never fire: %s", manifest.name, problem
+                        )
+                else:
+                    jobs.append(
+                        _Job(
+                            job_id=f"schedule:{manifest.name}",
+                            agent=manifest.name,
+                            reason="schedule",
+                            due=lambda now, last, s=manifest.schedule: _schedule_due(
+                                s, now, last
+                            ),
+                        )
                     )
-                )
             interval = check_in_interval(manifest.lifecycle)
             if interval is not None:
                 jobs.append(

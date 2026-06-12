@@ -229,7 +229,7 @@ class AgentExecutor:
         stamped = plan.model_copy(
             update={"agent": agent_name, "created_at": now, "week_of": week_of}
         )
-        await self._store.put(
-            Collections.PLANS, stamped.id, stamped.model_dump(mode="json")
-        )
+        # append, not put: time-ordered store keys are what make
+        # newest_first queries (latest plan, list_plans tool) actually work.
+        await self._store.append(Collections.PLANS, stamped.model_dump(mode="json"))
         return stamped

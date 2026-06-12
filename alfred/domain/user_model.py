@@ -8,6 +8,7 @@ banned because the summary lands inside agent prompts and tone leaks.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -52,6 +53,9 @@ class UserModelService:
     def __init__(self, store: StorePort, clock: ClockPort) -> None:
         self._store = store
         self._clock = clock
+        # Concurrent handlers (Discord tasks, heartbeat) share this service;
+        # the lock keeps profile read-modify-write cycles from losing updates.
+        self._profile_lock = asyncio.Lock()
 
     async def get_profile(self) -> UserProfile:
         doc = await self._store.get(Collections.PROFILE, _PROFILE_KEY)
@@ -80,22 +84,28 @@ class UserModelService:
             outcome.at = self._clock.now()
         await self._store.append(Collections.OUTCOMES, outcome.model_dump(mode="json"))
 
-        profile = await self.get_profile()
-        stats = profile.adherence.setdefault(outcome.agent, AdherenceStats())
-        if outcome.status is OutcomeStatus.DONE:
-            stats.done += 1
-            stats.consecutive_misses = 0
-        elif outcome.status is OutcomeStatus.PARTIAL:
-            stats.partial += 1
-            stats.consecutive_misses = 0
-        elif outcome.status is OutcomeStatus.MISSED:
-            stats.missed += 1
-            stats.consecutive_misses += 1
-        else:
-            # SKIPPED is a deliberate choice, not a lapse: it neither
-            # increments nor resets the consecutive-miss count.
-            stats.skipped += 1
-        await self.save_profile(profile)
+        async with self._profile_lock:
+            profile = await self.get_profile()
+            stats = profile.adherence.setdefault(outcome.agent, AdherenceStats())
+            if outcome.status is OutcomeStatus.DONE:
+                stats.done += 1
+                stats.consecutive_misses = 0
+                stats.consecutive_dones += 1
+            elif outcome.status is OutcomeStatus.PARTIAL:
+                stats.partial += 1
+                stats.consecutive_misses = 0
+                # A partial clears the miss spiral but does not count toward
+                # the 3-done streak a lapse recovery needs.
+                stats.consecutive_dones = 0
+            elif outcome.status is OutcomeStatus.MISSED:
+                stats.missed += 1
+                stats.consecutive_misses += 1
+                stats.consecutive_dones = 0
+            else:
+                # SKIPPED is a deliberate choice, not a lapse: it neither
+                # increments nor resets either streak.
+                stats.skipped += 1
+            await self.save_profile(profile)
 
     async def recent_observations(self, limit: int = 20) -> list[Observation]:
         docs = await self._store.query(

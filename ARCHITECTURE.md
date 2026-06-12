@@ -258,8 +258,8 @@ def check_in_interval(state: Lifecycle) -> timedelta | None
 def next_lifecycle(state: Lifecycle, stats: AdherenceStats) -> Lifecycle
     # deterministic transitions, e.g. FORMING + rate>=0.8 over >=14 logged
     # outcomes -> ESTABLISHED; any active state + consecutive_misses>=2 ->
-    # LAPSING; LAPSING + 3 consecutive done -> back to previous-equivalent
-    # (FORMING). Conservative: when unsure, stay put.
+    # LAPSING; LAPSING + consecutive_dones>=3 -> FORMING (rebuild gently).
+    # Conservative: when unsure, stay put.
 
 class LapseDoctor:
     def __init__(self, model: ModelPort, clock: ClockPort) -> None

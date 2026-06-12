@@ -208,6 +208,48 @@ async def test_quiet_hours_suppress_across_midnight() -> None:
     assert any(t.agent == "pulse" for t in runner.calls)
 
 
+async def test_daily_job_inside_quiet_hours_catches_up_after_midnight() -> None:
+    # A tracked daily job at 23:00 with quiet hours 22:30-07:30: suppressed
+    # at 23:00, it must fire on the first tick after the window ends next
+    # morning, not be lost until the schedule comes around again.
+    store = MemoryStore()
+    await store.put(
+        Collections.HEARTBEAT,
+        "schedule:journal",
+        {"last": datetime(2026, 1, 4, 23, 0, tzinfo=timezone.utc).isoformat()},
+    )
+    clock = FakeClock(datetime(2026, 1, 5, 23, 0, tzinfo=timezone.utc))
+    heartbeat, _, runner = build(
+        [agent("journal", kind="daily", time="23:00")],
+        clock=clock,
+        store=store,
+        quiet_hours="22:30-07:30",
+    )
+
+    assert await heartbeat.tick() == []  # 23:00, inside the window
+
+    clock.advance(hours=9)  # 08:00 next day, window over
+    fired = await heartbeat.tick()
+    assert any(t.agent == "journal" and t.reason == "schedule" for t in fired)
+
+    clock.advance(hours=2)  # 10:00 same day: yesterday's slot already served
+    assert all(t.agent != "journal" for t in await heartbeat.tick())
+
+
+async def test_misconfigured_schedule_warns_and_never_fires() -> None:
+    clock = FakeClock(MONDAY)
+    heartbeat, _, runner = build(
+        [
+            agent("no-time", kind="daily"),
+            agent("bad-days", kind="weekly", time="08:00", days=["someday"]),
+        ],
+        clock=clock,
+    )
+    fired = await heartbeat.tick()
+    assert all(t.reason != "schedule" for t in fired)
+    assert all(t.reason != "schedule" for t in runner.calls)
+
+
 async def test_restart_does_not_double_fire() -> None:
     clock = FakeClock(MONDAY)
     clock.advance(hours=2)  # 11:00, past the daily time

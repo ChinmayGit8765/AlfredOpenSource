@@ -38,6 +38,11 @@ PARSE_CASES: list[tuple[str, OutcomeStatus | None]] = [
     ("did not get around to it", OutcomeStatus.MISSED),
     ("failed", OutcomeStatus.MISSED),
     ("no", OutcomeStatus.MISSED),
+    ("not yet", OutcomeStatus.MISSED),
+    ("never got to it", OutcomeStatus.MISSED),
+    ("haven't had a chance", OutcomeStatus.MISSED),
+    ("couldn't make it", OutcomeStatus.MISSED),
+    ("won't happen today", OutcomeStatus.MISSED),
     # SKIPPED
     ("skip", OutcomeStatus.SKIPPED),
     ("Skipped", OutcomeStatus.SKIPPED),
@@ -47,11 +52,18 @@ PARSE_CASES: list[tuple[str, OutcomeStatus | None]] = [
     ("did half, then skipped", None),
     ("mostly done", None),
     ("I did it but missed the stretching", None),
+    # negated completions: the negator matches MISSED, the positive matches
+    # DONE, so the report is ambiguous and the caller must ask, not guess
+    ("not done", None),
+    ("never did it", None),
+    ("haven't finished", None),
+    ("couldn't complete it, only did it halfway", None),
     # no keyword at all
     ("", None),
     ("went to the gym and lifted", None),
     # word boundaries: substrings of keywords must not match
-    ("nothing to report", None),  # "no" inside "nothing"
+    ("nothing to report", None),  # "no" and "not" inside "nothing"
+    ("noted, more tomorrow", None),  # "not" inside "noted"
     ("passive recovery planning", None),  # "pass" inside "passive"
     ("yesterday was busy", None),  # "yes" inside "yesterday"
 ]

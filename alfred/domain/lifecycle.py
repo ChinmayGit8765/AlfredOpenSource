@@ -64,12 +64,9 @@ def next_lifecycle(state: Lifecycle, stats: AdherenceStats) -> Lifecycle:
         return Lifecycle.ESTABLISHED
     if state is Lifecycle.ESTABLISHED and stats.total >= 30 and stats.rate >= 0.85:
         return Lifecycle.MAINTENANCE
-    if (
-        state is Lifecycle.LAPSING
-        and stats.consecutive_misses == 0
-        and stats.rate >= 0.5
-    ):
-        # Recovered: rebuild gently from FORMING rather than jumping back.
+    if state is Lifecycle.LAPSING and stats.consecutive_dones >= 3:
+        # Recovered: three real completions in a row, per the binding
+        # contract. Rebuild gently from FORMING rather than jumping back.
         return Lifecycle.FORMING
     return state
 

@@ -10,7 +10,7 @@ access: confirmation and approval flows only call into governance.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from alfred.config import AlfredConfig
@@ -19,7 +19,7 @@ from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.feedback import adherence_signal, parse_outcome_report
-from alfred.domain.governance import PendingActions, Proposals
+from alfred.domain.governance import PendingActions, Proposals, audit
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry, LoadedAgent
 from alfred.domain.routing import route
@@ -110,6 +110,11 @@ class AlfredCore:
         self._config = config
         self._agents_dir = Path(agents_dir)
         self.stop_requested = False
+        # Freshest channel the owner spoke on; scheduled output goes there
+        # when no channel is configured. In-memory on purpose: a stale "cli"
+        # channel from a previous chat session must not capture Discord-mode
+        # proactive sends.
+        self._last_channel: str | None = None
 
     # --- entry points ---------------------------------------------------
 
@@ -120,10 +125,16 @@ class AlfredCore:
             )
             text = message.text.strip()
 
-            if await self._try_command(message, text):
-                return
-            if await self._try_builder_continuation(message, text):
-                return
+            # Commands, builder sessions, and outcome logging are owner
+            # authority. Content from connectors (provenance "external")
+            # gets agent routing only; it can never confirm an action,
+            # approve a proposal, or steer a build.
+            if message.provenance == "owner":
+                self._last_channel = message.channel
+                if await self._try_command(message, text):
+                    return
+                if await self._try_builder_continuation(message, text):
+                    return
             await self._route_and_run(message, text)
         except Exception as exc:
             logger.exception("handle_inbound failed for message %s", message.id)
@@ -137,12 +148,12 @@ class AlfredCore:
                 logger.exception("failed to deliver the error notice")
 
     async def run_scheduled(self, trigger: ScheduledTrigger) -> None:
-        channel = await self._scheduled_channel()
+        channel = self._scheduled_channel()
         if trigger.reason == "reflection":
             reflection = await self._reflection.reflect(
                 self._registry, self._config.heartbeat.reflection_days
             )
-            await self._send(channel, self._render_reflection(reflection))
+            await self._send_scheduled(channel, self._render_reflection(reflection))
             return
 
         agent = self._registry.get(trigger.agent)
@@ -155,7 +166,25 @@ class AlfredCore:
             return
         text = _CHECK_IN_TEXT if trigger.reason == "check_in" else _PLANNING_TEXT
         result = await self._executor.run(agent, text=text, provenance="scheduler")
-        await self._deliver_result(channel, result)
+        if channel is not None:
+            await self._deliver_result(channel, result)
+
+        # Staggered Monday planning runs still land in one coherent week:
+        # once two or more agents have plans for the same week, the
+        # Conductor reconciles them. The result is persisted always and
+        # surfaced only when it changed something.
+        if trigger.reason == "schedule" and result.plan is not None:
+            plans = await self._latest_plans_for_week(result.plan.week_of)
+            if len(plans) >= 2:
+                profile = await self._user_model.get_profile()
+                schedule = await self._conductor.reconcile(plans, profile)
+                await self._store.append(
+                    Collections.SCHEDULES, schedule.model_dump(mode="json")
+                )
+                if schedule.adjustments or schedule.warnings:
+                    await self._send_scheduled(
+                        channel, self._render_schedule(schedule)
+                    )
 
     # --- commands ---------------------------------------------------------
 
@@ -212,7 +241,15 @@ class AlfredCore:
         elif head in ("optimise", "optimize") and len(parts) >= 2:
             goal = text.split(maxsplit=1)[1].strip()
         if goal:
+            # A fresh build supersedes any open session; otherwise the old
+            # one resurrects later and intercepts unrelated messages.
+            superseded = await self._builder.abandon_active()
             _, first_message = await self._builder.start(goal, self._registry)
+            if superseded is not None:
+                first_message = (
+                    "(I closed the building session that was still open.)\n"
+                    + first_message
+                )
             await self._send(channel, first_message)
             return True
 
@@ -286,7 +323,12 @@ class AlfredCore:
         await self._send(channel, f"Rejected proposal {proposal_id}; nothing changes.")
 
     async def _apply_proposal(self, proposal: Proposal) -> str:
-        """Apply an approved proposal where the runtime knows how; else defer."""
+        """Apply an approved proposal where the runtime knows how; else defer.
+
+        Every application captures the value it replaced back onto the
+        stored proposal (so an approved change is reversible by hand from
+        the record) and writes a proposal_applied audit event.
+        """
         by_hand = (
             "I cannot apply this change automatically; it is approved but "
             "must be applied by hand."
@@ -299,6 +341,19 @@ class AlfredCore:
             except ValueError:
                 logger.warning("approved NEW_AGENT proposal %s has an unparseable blueprint", proposal.id)
                 return by_hand
+            stripped: list[str] = []
+            if blueprint.manifest.allowed_tools and not proposal.touches_safety:
+                # Least privilege is load-bearing: a proposal that was not
+                # flagged (and double-confirmed) as touching safety cannot
+                # smuggle in a pre-populated allowlist.
+                stripped = list(blueprint.manifest.allowed_tools)
+                blueprint.manifest.allowed_tools = []
+                logger.warning(
+                    "NEW_AGENT proposal %s carried tools %s without "
+                    "touches_safety; stripped",
+                    proposal.id,
+                    stripped,
+                )
             try:
                 path = materialise_agent(self._agents_dir, blueprint)
             except AlfredError as exc:
@@ -310,7 +365,15 @@ class AlfredCore:
                     path=str(path),
                 )
             )
-            return f"Agent '{blueprint.manifest.name}' is created and live."
+            await self._record_application(proposal, old=None)
+            note = f"Agent '{blueprint.manifest.name}' is created and live."
+            if stripped:
+                note += (
+                    f" Its proposed tools ({', '.join(stripped)}) were NOT "
+                    "granted: tool access needs a touches-safety proposal or "
+                    "a manifest edit by you."
+                )
+            return note
 
         if proposal.kind is ProposalKind.LIFECYCLE_CHANGE:
             agent = self._registry.get(proposal.agent)
@@ -320,10 +383,12 @@ class AlfredCore:
                 new_state = Lifecycle(proposal.new)
             except ValueError:
                 return by_hand
+            old_state = agent.manifest.lifecycle.value
             agent.manifest.lifecycle = new_state
             on_disk = self._write_manifest(agent)
+            await self._record_application(proposal, old=old_state)
             return (
-                f"'{proposal.agent}' is now {new_state.value}"
+                f"'{proposal.agent}' is now {new_state.value} (was {old_state})"
                 + ("." if on_disk else " (in memory only; its folder is missing on disk).")
             )
 
@@ -331,17 +396,39 @@ class AlfredCore:
             agent = self._registry.get(proposal.agent)
             if agent is None or proposal.new is None:
                 return by_hand
+            old_prompt = agent.prompt
             agent.prompt = proposal.new
             folder = self._agent_folder(agent)
+            await self._record_application(proposal, old=old_prompt)
             if folder.is_dir():
                 (folder / "agent.md").write_text(proposal.new, encoding="utf-8")
-                return f"'{proposal.agent}' has its new prompt."
+                return (
+                    f"'{proposal.agent}' has its new prompt. The previous one "
+                    "is kept on the proposal record."
+                )
             return (
                 f"'{proposal.agent}' has its new prompt in memory only; "
                 "its folder is missing on disk."
             )
 
         return by_hand
+
+    async def _record_application(self, proposal: Proposal, old: str | None) -> None:
+        """Persist the replaced value onto the proposal and audit the apply."""
+        if old is not None and proposal.old is None:
+            updated = proposal.model_copy(update={"old": old})
+            await self._store.put(
+                Collections.PROPOSALS, updated.id, updated.model_dump(mode="json")
+            )
+        await audit(
+            self._store,
+            self._clock,
+            "proposal_applied",
+            proposal_id=proposal.id,
+            kind=proposal.kind.value,
+            agent=proposal.agent,
+            touches_safety=proposal.touches_safety,
+        )
 
     def _agent_folder(self, agent: LoadedAgent) -> Path:
         return Path(agent.path) if agent.path else self._agents_dir / agent.manifest.name
@@ -397,8 +484,15 @@ class AlfredCore:
         routed = route(message, self._registry)
 
         # Outcome shorthand is recorded before the agent runs so the run
-        # reacts with the outcome already in the record.
-        if len(routed) == 1:
+        # reacts with the outcome already in the record. Guarded hard:
+        # owner only, exactly one routed agent, and a SHORT message, so an
+        # ordinary sentence that happens to contain "done" cannot silently
+        # corrupt adherence stats.
+        if (
+            message.provenance == "owner"
+            and len(routed) == 1
+            and len(text.split()) <= 8
+        ):
             status = parse_outcome_report(text)
             if status is not None:
                 name = routed[0].manifest.name
@@ -433,9 +527,11 @@ class AlfredCore:
             profile = await self._user_model.get_profile()
             schedule = await self._conductor.reconcile(plans, profile)
             await self._send(message.channel, self._render_schedule(schedule))
-            doc = schedule.model_dump(mode="json")
-            doc["agent"] = "conductor"
-            await self._store.append(Collections.PLANS, doc)
+            # Schedules live in their own collection: a ReconciledSchedule
+            # doc inside PLANS would pollute every Plan query.
+            await self._store.append(
+                Collections.SCHEDULES, schedule.model_dump(mode="json")
+            )
 
     async def _deliver_result(self, channel: str, result: ExecutionResult) -> None:
         for reply in result.replies:
@@ -579,12 +675,42 @@ class AlfredCore:
     async def _send(self, channel: str, text: str) -> None:
         await self._transport.send(OutboundMessage(channel=channel, text=text))
 
-    async def _scheduled_channel(self) -> str:
+    def _scheduled_channel(self) -> str | None:
+        """Where proactive output goes: configured channel, else the channel
+        the owner last spoke on this process, else nowhere (loudly).
+
+        Deliberately no fallback to the stored message log: a "cli" channel
+        from yesterday's terminal session must not capture Discord-mode
+        sends into a transport that cannot deliver them.
+        """
         if self._config.discord.channel_id:
             return str(self._config.discord.channel_id)
+        return self._last_channel
+
+    async def _send_scheduled(self, channel: str | None, text: str) -> None:
+        if channel is None:
+            logger.warning(
+                "scheduled output has no destination (no discord.channel_id "
+                "configured and the owner has not messaged yet); dropping: %.120s",
+                text,
+            )
+            return
+        await self._send(channel, text)
+
+    async def _latest_plans_for_week(self, week_of: date | None) -> list[Plan]:
+        """The newest plan per active agent for the given week."""
         docs = await self._store.query(
-            Collections.MESSAGES, limit=1, newest_first=True
+            Collections.PLANS, limit=200, newest_first=True
         )
-        if docs and isinstance(docs[0].get("channel"), str) and docs[0]["channel"]:
-            return docs[0]["channel"]
-        return "cli"
+        active = {agent.manifest.name for agent in self._registry.active()}
+        by_agent: dict[str, Plan] = {}
+        for doc in docs:
+            data = {k: v for k, v in doc.items() if k != "_key"}
+            try:
+                plan = Plan.model_validate(data)
+            except ValueError:
+                continue
+            if plan.agent not in active or plan.week_of != week_of:
+                continue
+            by_agent.setdefault(plan.agent, plan)  # newest first wins
+        return list(by_agent.values())

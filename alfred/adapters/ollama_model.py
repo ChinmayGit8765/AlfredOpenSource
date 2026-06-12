@@ -38,6 +38,11 @@ class OllamaModelAdapter:
         self._config = config
         # client injection keeps tests offline; production builds the real one.
         self._client: Any = client if client is not None else ollama.AsyncClient(host=config.host)
+        # Set by ensure_model: the exact locally-available name that satisfied
+        # the configured one. Chatting with a bare name like "qwen3" makes
+        # Ollama resolve it to ":latest", which 404s when only a tagged
+        # variant ("qwen3:8b") is pulled.
+        self._resolved: str | None = None
 
     async def complete(
         self,
@@ -54,8 +59,9 @@ class OllamaModelAdapter:
         if opts.max_tokens is not None:
             ollama_options["num_predict"] = opts.max_tokens
 
+        model = opts.model or self._resolved or self._config.name
         kwargs: dict[str, Any] = {
-            "model": opts.model or self._config.name,
+            "model": model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "options": ollama_options,
         }
@@ -69,13 +75,21 @@ class OllamaModelAdapter:
                 f"could not reach Ollama at {self._config.host}; "
                 f"is the Ollama server running? ({exc})"
             ) from exc
+        except ollama.ResponseError as exc:
+            raise AlfredError(
+                f"Ollama rejected the request for model '{model}': {exc}. "
+                f"If the model is missing, pull it with: ollama pull {model}"
+            ) from exc
         return response.message.content or ""
 
     async def ensure_model(self) -> str:
-        """Return a locally available model name, preferring config.name.
+        """Resolve and remember a locally available model name.
 
-        Falls back through config.fallbacks in order; raises ConfigError
-        listing what is available when nothing usable is pulled.
+        Prefers config.name, then config.fallbacks in order. Returns the
+        exact available name that matched (a wanted "qwen3" satisfied by a
+        pulled "qwen3:8b" resolves to "qwen3:8b"), and subsequent complete()
+        calls default to it. Raises ConfigError listing what is available
+        when nothing usable is pulled.
         """
         try:
             listing = await self._client.list()
@@ -86,16 +100,19 @@ class OllamaModelAdapter:
             ) from exc
 
         available = [m.model for m in listing.models if m.model]
-        if any(_matches(self._config.name, name) for name in available):
-            return self._config.name
-        for fallback in self._config.fallbacks:
-            if any(_matches(fallback, name) for name in available):
-                logger.warning(
-                    "model %s not pulled locally; falling back to %s",
-                    self._config.name,
-                    fallback,
-                )
-                return fallback
+        for wanted in [self._config.name, *self._config.fallbacks]:
+            resolved = next(
+                (name for name in available if _matches(wanted, name)), None
+            )
+            if resolved is not None:
+                if wanted != self._config.name:
+                    logger.warning(
+                        "model %s not pulled locally; falling back to %s",
+                        self._config.name,
+                        resolved,
+                    )
+                self._resolved = resolved
+                return resolved
         raise ConfigError(
             f"no usable model: wanted {self._config.name} "
             f"(fallbacks: {', '.join(self._config.fallbacks) or 'none'}), "

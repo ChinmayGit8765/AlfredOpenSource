@@ -83,8 +83,10 @@ policy:
   # always confirms regardless of this setting. Default: true
   auto_approve_reversible: true
 
-  # When true, workflows that touch multiple systems preview their actions
-  # before executing them. Default: true
+  # Reserved for the phase-6 action layer: when cross-system workflows
+  # arrive, true will make them preview their actions before executing.
+  # Nothing reads this yet; it exists so the safe default is already set
+  # when that capability lands. Default: true
   dry_run_cross_system: true
 
   # Hours before an unconfirmed pending action expires. Default: 24

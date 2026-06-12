@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alfred.adapters.local_tools import LocalToolAdapter
 from alfred.adapters.mcp_tools import CompositeToolAdapter, McpToolAdapter
@@ -50,9 +51,25 @@ logger = logging.getLogger(__name__)
 
 
 class SystemClock:
-    """ClockPort over the real wall clock, always timezone-aware."""
+    """ClockPort over the real wall clock, always timezone-aware.
+
+    An explicit IANA timezone name pins schedules and quiet hours to that
+    zone; otherwise the system local zone applies.
+    """
+
+    def __init__(self, tz_name: str | None = None) -> None:
+        self._tz: ZoneInfo | None = None
+        if tz_name:
+            try:
+                self._tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                logger.warning(
+                    "unknown timezone %r; using the system local zone", tz_name
+                )
 
     def now(self) -> datetime:
+        if self._tz is not None:
+            return datetime.now(self._tz)
         return datetime.now().astimezone()
 
     async def sleep(self, seconds: float) -> None:
@@ -108,6 +125,39 @@ _DRY_RUN_REPLY = {
     "done": True,
 }
 
+# Schemas the zero-filler cannot satisfy (nested required models, slug
+# patterns) or where zero values would wedge a flow (elicitation that never
+# becomes satisfied) get canned shapes so the fake pipeline runs end to end.
+_DRY_RUN_BLUEPRINT = {
+    "manifest": {
+        "name": "dry-run-agent",
+        "description": (
+            "Placeholder agent designed in dry-run mode; rebuild with a "
+            "real model connected before relying on it."
+        ),
+        "shape": "habit",
+        "lifecycle": "proposed",
+        "schedule": {"kind": "daily", "time": "08:00"},
+        "capacity_cost": 1,
+    },
+    "prompt_md": (
+        "# dry-run-agent\n\n"
+        "Identity: a placeholder built offline in dry-run mode.\n"
+        "Scope: demonstrates the build flow; it optimises nothing real.\n"
+        "Smallest viable size: the smallest possible, by construction.\n"
+        "Anchor: after opening the terminal, glance at this agent.\n"
+        "Tone: a lapse is data, never a moral failure; no streak pressure, "
+        "no fake urgency.\n"
+        "Output: one short check-in line."
+    ),
+}
+
+_DRY_RUN_ELICIT = {
+    "question": "",
+    "satisfied": True,
+    "real_lever": "dry-run lever (offline mode; no real elicitation happened)",
+}
+
 
 def _zero_value(prop: Mapping[str, Any], defs: Mapping[str, Any]) -> Any:
     """Type-appropriate zero value for one schema property, top level only."""
@@ -152,8 +202,13 @@ class DryRunModel:
     ) -> str:
         if json_schema is None:
             return "dry-run"
-        if json_schema.get("title") == "AgentReply":
-            return json.dumps(_DRY_RUN_REPLY)
+        match json_schema.get("title"):
+            case "AgentReply":
+                return json.dumps(_DRY_RUN_REPLY)
+            case "AgentBlueprint":
+                return json.dumps(_DRY_RUN_BLUEPRINT)
+            case "_ElicitStep":
+                return json.dumps(_DRY_RUN_ELICIT)
         defs = json_schema.get("$defs", {})
         properties = json_schema.get("properties", {})
         filled = {
@@ -193,7 +248,7 @@ def build_system(
     transport: TransportPort | None = None,
 ) -> ComposedSystem:
     """Wire the full system from config. The only composition root."""
-    clock = SystemClock()
+    clock = SystemClock(config.timezone)
 
     store: StorePort
     model: ModelPort

@@ -107,8 +107,11 @@ async def test_plan_is_stamped_persisted_and_week_of_defaults_to_monday():
     assert result.plan.agent == "trainer"
     assert result.plan.created_at == clock.now()
     assert result.plan.week_of == date(2026, 1, 5)
-    doc = await store.get(Collections.PLANS, result.plan.id)
-    assert doc is not None
+    # Plans are appended under time-ordered store keys (newest_first works),
+    # so the lookup is a query by the plan's own id field, not a keyed get.
+    docs = await store.query(Collections.PLANS, where={"id": result.plan.id})
+    assert len(docs) == 1
+    doc = docs[0]
     assert doc["agent"] == "trainer"
     assert doc["week_of"] == "2026-01-05"
     runs = [
