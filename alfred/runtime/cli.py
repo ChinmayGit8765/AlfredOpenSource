@@ -11,18 +11,24 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import queue
 import threading
 from pathlib import Path
 
+from rich.panel import Panel
+from rich.syntax import Syntax
+
+import alfred
 from alfred.adapters.discord_transport import DiscordTransportAdapter
 from alfred.adapters.ollama_model import OllamaModelAdapter
 from alfred.config import AlfredConfig, load_config
 from alfred.domain.schemas import InboundMessage, Plan
 from alfred.domain.structured import structured_call
-from alfred.errors import AlfredError
+from alfred.errors import AlfredError, ConfigError
 from alfred.logging_setup import configure_logging
 from alfred.ports import ModelPort, OutboundMessage
+from alfred.runtime import ui
 from alfred.runtime.agent_loader import load_agents
 from alfred.runtime.composition import (
     ComposedSystem,
@@ -31,6 +37,7 @@ from alfred.runtime.composition import (
     build_system,
     connect_mcp,
 )
+from alfred.runtime.ui import console
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +78,10 @@ discord:
 
 
 class LoopbackTransport:
-    """TransportPort for the chat REPL: replies print straight to the terminal."""
+    """TransportPort for the chat REPL: replies render straight to the terminal."""
 
     async def send(self, message: OutboundMessage) -> None:
-        print(f"ALFRED> {message.text}")
+        ui.print_reply(message.text)
 
 
 class _StdinReader:
@@ -133,29 +140,37 @@ async def _shutdown(system: ComposedSystem) -> None:
 
 
 async def _cmd_init(config_path: str | None) -> int:
+    ui.print_banner("init")
     target = Path(config_path) if config_path else _DEFAULT_CONFIG_PATH
     if target.exists():
-        print(f"Config already exists, refusing to overwrite: {target}")
+        console.print(ui.check_line("warn", "config", f"already exists, kept: {target}"))
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_DEFAULT_CONFIG, encoding="utf-8")
-        print(f"Wrote {target}")
+        console.print(ui.check_line("ok", "config", f"wrote {target}"))
 
     config = load_config(target)
     config.data_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Data directory ready: {config.data_dir}")
+    console.print(ui.check_line("ok", "data dir", str(config.data_dir)))
 
     try:
         chosen = await _probe_ollama(config)
     except Exception as exc:
-        print(
-            "Note: Ollama was not reachable "
-            f"({type(exc).__name__}). Chat and run will need it; start the "
-            "Ollama server and pull a model (ollama pull qwen3:8b), or use "
-            "chat --fake to try ALFRED offline."
+        console.print(
+            ui.check_line(
+                "warn",
+                "ollama",
+                f"not reachable ({type(exc).__name__}); chat and run need it. "
+                "Start Ollama and pull a model (ollama pull qwen3:8b), or try "
+                "chat --fake offline.",
+            )
         )
     else:
-        print(f"Ollama is reachable; ALFRED will use model: {chosen}")
+        console.print(ui.check_line("ok", "ollama", f"reachable, model: {chosen}"))
+    console.print(
+        "\n[chrome]Next:[/] alfred chat --fake [chrome](offline demo) or[/] "
+        "alfred doctor [chrome](full readiness check)[/]"
+    )
     return 0
 
 
@@ -165,13 +180,15 @@ async def _cmd_chat(fake: bool, config_path: str | None) -> int:
     if not fake:
         # Chat and run expose the same tool surface for the same agents.
         await connect_mcp(system)
+    ui.print_banner(f"chat {ui.DOT} dry-run" if fake else f"chat {ui.DOT} {config.llm.name}")
     names = ", ".join(a.manifest.name for a in system.registry.active()) or "none"
-    mode = " (dry-run mode)" if fake else ""
-    print(f"ALFRED chat{mode}. Active agents: {names}. Empty line or 'exit' quits.")
+    console.print(f"[chrome]Active agents:[/] {names}")
+    console.print("[chrome]Empty line or 'exit' quits; 'help' lists commands.[/]\n")
     reader = _StdinReader()
+    prompt = ui.prompt_string()
     try:
         while True:
-            line = await reader.read("you> ")
+            line = await reader.read(prompt)
             if line is None:
                 break
             # Piped input on Windows can carry a UTF-8 BOM; strip it.
@@ -180,13 +197,16 @@ async def _cmd_chat(fake: bool, config_path: str | None) -> int:
             line = line.strip()
             if not line or line.lower() in ("exit", "quit"):
                 break
-            await system.core.handle_inbound(InboundMessage(channel="cli", text=line))
+            with console.status("[chrome]ALFRED is thinking…[/]", spinner="dots"):
+                await system.core.handle_inbound(
+                    InboundMessage(channel="cli", text=line)
+                )
             if system.core.stop_requested:
                 break
     except KeyboardInterrupt:
         pass
     finally:
-        print("Goodbye.")
+        console.print("[chrome]Goodbye.[/]")
         await _shutdown(system)
     return 0
 
@@ -194,28 +214,33 @@ async def _cmd_chat(fake: bool, config_path: str | None) -> int:
 async def _cmd_run(config_path: str | None) -> int:
     config = load_config(config_path)
     system = build_system(config)
+    ui.print_banner("full service")
     try:
         chosen = await _probe_ollama(config)
     except Exception as exc:
-        print(f"Cannot start: no usable model ({exc}).")
-        print(_OLLAMA_HINT)
+        console.print(f"[bad]Cannot start:[/] no usable model ({exc}).")
+        console.print(f"[chrome]{_OLLAMA_HINT}[/]")
         await _shutdown(system)
         return 1
     # ensure_model may have picked a fallback; make the adapter use it.
     config.llm.name = chosen
-    print(f"Model ready: {chosen}")
+    ui.step(f"model ready: {chosen}")
 
     if config.discord.owner_id == 0:
-        print(
-            "WARNING: discord.owner_id is 0 (the default), so EVERY message "
-            "will be ignored. Set your Discord user id in config/alfred.yaml."
+        console.print(
+            "[warn]WARNING:[/] discord.owner_id is 0 (the default), so EVERY "
+            "message will be ignored. Set your Discord user id in "
+            "config/alfred.yaml."
         )
 
     await connect_mcp(system)
+    if config.mcp_servers:
+        ui.step(f"MCP servers configured: {len(config.mcp_servers)}")
 
     discord = DiscordTransportAdapter(config.discord, system.core.handle_inbound)
     if isinstance(system.transport, SwitchableTransport):
         system.transport.inner = discord
+    ui.step("Discord gateway starting")
 
     async def watch_stop() -> None:
         # The owner's kill switch: "alfred stop" in chat sets the flag and
@@ -231,10 +256,17 @@ async def _cmd_run(config_path: str | None) -> int:
         tasks.append(
             asyncio.create_task(system.heartbeat.run_forever(), name="heartbeat")
         )
+        ui.step("heartbeat running")
     else:
-        print("Heartbeat disabled in config: ALFRED will only react, never initiate.")
+        console.print(
+            "[warn]Heartbeat disabled in config:[/] ALFRED will only react, "
+            "never initiate."
+        )
 
-    print("ALFRED is running. Ctrl-C (or 'alfred stop' in chat) to stop.")
+    console.print(
+        "\n[ok]ALFRED is running.[/] [chrome]Ctrl-C (or 'alfred stop' in chat) "
+        "to stop.[/]"
+    )
     exit_code = 0
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -244,12 +276,15 @@ async def _cmd_run(config_path: str | None) -> int:
                 continue
             name = type(exc).__name__
             if name == "LoginFailure":
-                print(
-                    "Discord rejected the bot token. Check the "
+                console.print(
+                    "[bad]Discord rejected the bot token.[/] Check the "
                     f"{config.discord.token_env} environment variable."
                 )
             else:
-                print(f"Service task {task.get_name()!r} failed ({name}): {exc}")
+                console.print(
+                    f"[bad]Service task {task.get_name()!r} failed[/] "
+                    f"({name}): {exc}"
+                )
             logger.error("service task %s failed: %s", task.get_name(), exc)
             exit_code = 1
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -260,7 +295,7 @@ async def _cmd_run(config_path: str | None) -> int:
         await asyncio.gather(*tasks, return_exceptions=True)
         await _close_quietly(discord)
         await _shutdown(system)
-        print("Stopped.")
+        console.print("[chrome]Stopped.[/]")
     return exit_code
 
 
@@ -269,23 +304,9 @@ async def _cmd_agents_list(config_path: str | None) -> int:
     registry = load_agents(config.agents_dir)
     agents = registry.all()
     if not agents:
-        print(f"No agents found in {config.agents_dir}.")
+        console.print(f"[warn]No agents found in {config.agents_dir}.[/]")
         return 0
-    rows = [("name", "lifecycle", "domain", "schedule", "tools")]
-    for agent in agents:
-        manifest = agent.manifest
-        rows.append(
-            (
-                manifest.name,
-                manifest.lifecycle.value,
-                manifest.domain or "-",
-                manifest.schedule.kind,
-                str(len(manifest.allowed_tools)),
-            )
-        )
-    widths = [max(len(row[col]) for row in rows) for col in range(len(rows[0]))]
-    for row in rows:
-        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)))
+    console.print(ui.agents_table(agents))
     return 0
 
 
@@ -298,19 +319,126 @@ async def _cmd_demo_roundtrip(fake: bool, config_path: str | None) -> int:
         try:
             config.llm.name = await _probe_ollama(config)
         except Exception as exc:
-            print(f"Cannot run the round-trip: {exc}")
-            print(_OLLAMA_HINT)
+            console.print(f"[bad]Cannot run the round-trip:[/] {exc}")
+            console.print(f"[chrome]{_OLLAMA_HINT}[/]")
             return 1
         model = OllamaModelAdapter(config.llm)
 
-    plan = await structured_call(
-        model,
-        schema=Plan,
-        system="You produce structured training plans.",
-        user="Produce a tiny 3-item example training plan for next week.",
+    with console.status("[chrome]one structured call, validated…[/]", spinner="dots"):
+        plan = await structured_call(
+            model,
+            schema=Plan,
+            system="You produce structured training plans.",
+            user="Produce a tiny 3-item example training plan for next week.",
+        )
+    rendered = Syntax(
+        json.dumps(plan.model_dump(mode="json"), indent=2),
+        "json",
+        background_color="default",
     )
-    print(json.dumps(plan.model_dump(mode="json"), indent=2))
-    print("validated: Plan")
+    console.print(
+        Panel(
+            rendered,
+            title="model output, schema-validated",
+            title_align="left",
+            border_style="accent",
+        )
+    )
+    console.print("[ok]✓[/] validated: Plan")
+    return 0
+
+
+async def _cmd_doctor(config_path: str | None) -> int:
+    """Readiness check: everything ALFRED needs, one glance, no surprises."""
+    ui.print_banner("doctor")
+    hard_fail = False
+
+    target = Path(config_path) if config_path else _DEFAULT_CONFIG_PATH
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        console.print(ui.check_line("bad", "config", str(exc)))
+        return 1
+    if target.is_file():
+        console.print(ui.check_line("ok", "config", str(target)))
+    else:
+        console.print(
+            ui.check_line("warn", "config", "no config file; using defaults (alfred init)")
+        )
+
+    try:
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        probe = config.data_dir / ".doctor-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        console.print(ui.check_line("ok", "data dir", f"writable: {config.data_dir}"))
+    except OSError as exc:
+        console.print(ui.check_line("bad", "data dir", f"not writable: {exc}"))
+        hard_fail = True
+
+    registry = load_agents(config.agents_dir)
+    agents = registry.all()
+    if agents:
+        names = ", ".join(a.manifest.name for a in agents)
+        console.print(ui.check_line("ok", "agents", f"{len(agents)} loaded: {names}"))
+    else:
+        console.print(
+            ui.check_line("warn", "agents", f"none found in {config.agents_dir}")
+        )
+
+    try:
+        chosen = await _probe_ollama(config)
+        console.print(ui.check_line("ok", "ollama", f"{config.llm.host} · model {chosen}"))
+    except Exception as exc:
+        console.print(
+            ui.check_line(
+                "warn",
+                "ollama",
+                f"unreachable ({type(exc).__name__}); chat --fake still works",
+            )
+        )
+
+    if config.discord.owner_id == 0:
+        console.print(
+            ui.check_line("warn", "discord owner", "owner_id is 0; every message ignored")
+        )
+    else:
+        console.print(ui.check_line("ok", "discord owner", str(config.discord.owner_id)))
+    if os.environ.get(config.discord.token_env):
+        console.print(
+            ui.check_line("ok", "discord token", f"{config.discord.token_env} is set")
+        )
+    else:
+        console.print(
+            ui.check_line(
+                "warn", "discord token", f"{config.discord.token_env} not set; run needs it"
+            )
+        )
+
+    if config.mcp_servers:
+        try:
+            import mcp  # noqa: F401
+
+            console.print(
+                ui.check_line(
+                    "ok", "mcp", f"{len(config.mcp_servers)} server(s) configured"
+                )
+            )
+        except ImportError:
+            console.print(
+                ui.check_line(
+                    "bad",
+                    "mcp",
+                    'servers configured but the extra is missing: uv pip install "alfred[mcp]"',
+                )
+            )
+    else:
+        console.print(ui.check_line("off", "mcp", "no servers configured (phase 6)"))
+
+    if hard_fail:
+        console.print("\n[bad]Not ready.[/] Fix the failures above.")
+        return 1
+    console.print("\n[ok]Ready.[/] [chrome]alfred chat to talk, alfred run for the full service.[/]")
     return 0
 
 
@@ -322,10 +450,16 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="alfred",
         description="ALFRED: a self-hosted, local-first life-optimization system.",
     )
+    parser.add_argument(
+        "--version", action="version", version=f"alfred {alfred.__version__}"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="create config/alfred.yaml and the data dir")
     p_init.add_argument("--config", default=None, help="config file path to create")
+
+    p_doctor = sub.add_parser("doctor", help="readiness check: config, model, agents, transport")
+    p_doctor.add_argument("--config", default=None, help="config file path")
 
     p_chat = sub.add_parser("chat", help="talk to ALFRED in a terminal REPL")
     p_chat.add_argument("--fake", action="store_true", help="offline dry-run mode")
@@ -353,6 +487,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
     match args.command:
         case "init":
             return await _cmd_init(args.config)
+        case "doctor":
+            return await _cmd_doctor(args.config)
         case "chat":
             return await _cmd_chat(args.fake, args.config)
         case "run":
@@ -366,15 +502,17 @@ async def _dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    configure_logging()
     args = _build_parser().parse_args(argv)
+    # The long-running service logs its pulse; interactive commands stay
+    # quiet so the conversation is the only thing on screen.
+    configure_logging(logging.INFO if args.command == "run" else logging.WARNING)
     try:
         code = asyncio.run(_dispatch(args))
     except KeyboardInterrupt:
-        print("\nInterrupted; goodbye.")
+        console.print("\n[chrome]Interrupted; goodbye.[/]")
         code = 0
     except AlfredError as exc:
-        print(f"Error: {exc}")
+        console.print(f"[bad]Error:[/] {exc}")
         code = 1
     if code:
         raise SystemExit(code)

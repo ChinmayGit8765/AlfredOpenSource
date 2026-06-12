@@ -8,6 +8,7 @@ build/
 dist/
 
 # ALFRED local state (never commit the owner's data)
+data/
 *.db
 *.db-wal
 *.db-shm

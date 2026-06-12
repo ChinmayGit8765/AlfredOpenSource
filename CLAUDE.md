@@ -24,5 +24,6 @@ contracts are `ARCHITECTURE.md`. Read both before changing anything.
   capability-tier gating + audit). Never invoke `ToolPort` directly from an
   agent path.
 - Store collection names come from `schemas.Collections`, never bare strings.
-- pydantic v2 idioms only; no `print` outside `runtime/cli.py`; comments say
-  why, not what; no em-dashes in prose.
+- pydantic v2 idioms only; terminal output only via `runtime/cli.py` and
+  `runtime/ui.py` (rich console); comments say why, not what; no em-dashes
+  in prose.

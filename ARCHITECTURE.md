@@ -45,8 +45,9 @@ layers clean.
 4. `alfred/ports/*` imports nothing from alfred except `alfred.errors`.
 5. Everything async-first: all port methods and domain services are `async`
    except pure functions.
-6. Structured logging via `logging.getLogger(__name__)`. No `print` outside
-   `runtime/cli.py`. Never log credentials or raw tokens.
+6. Structured logging via `logging.getLogger(__name__)`. Terminal output
+   only via `runtime/cli.py` and `runtime/ui.py` (the rich console). Never
+   log credentials or raw tokens.
 7. All structured data is pydantic v2 (`model_validate`, `model_dump`,
    `model_json_schema`). Never v1 idioms (`.dict()`, `.parse_obj()`).
 

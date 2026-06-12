@@ -1,6 +1,19 @@
+<div align="center">
+
 # ALFRED
 
-A self-hosted, local-first, multi-agent life-optimization system.
+**A self-hosted, local-first, multi-agent life-optimization system.**
+
+*Your goals. Your hardware. Your keys. One loyalty: yours.*
+
+[![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
+[![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
+[![offline tests](https://img.shields.io/badge/tests-340%20offline-success)](tests/)
+
+<img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
+
+</div>
 
 ALFRED is a bet on a specific future: the most important AI in your life
 should not live in a corporate data centre optimising for engagement. It
@@ -14,6 +27,16 @@ works, the less you should need it.
 What it is NOT: not a chatbot, not a generic assistant, not a cloud
 service. It will not chat about the weather, it ignores everyone except its
 owner, and nothing it learns about you ever leaves your machine.
+
+**Why not OpenClaw, or a cloud assistant?** OpenClaw and Odysseus proved
+the plumbing (folder-as-config, local models, MCP); ALFRED borrows those
+patterns and spends its originality where they stop: a Conductor that
+makes concurrent plans coexist inside a real capacity budget, an agent
+builder that understands how behaviour change actually works (lapses are
+data, not failures), and a governance layer where every tool call passes
+an allowlist, a capability tier, and an audit trail. Cloud assistants
+optimise for your attention. ALFRED is structurally incapable of it: no
+telemetry, no engagement loop, no account.
 
 ## Status
 
@@ -49,14 +72,15 @@ uv venv
 uv pip install -e ".[dev]"        # add the optional MCP extra with ".[dev,mcp]"
 .venv\Scripts\Activate.ps1
 alfred init                        # writes config/alfred.yaml, creates data/, probes Ollama
+alfred doctor                      # one-glance readiness check: config, model, agents, transport
 ```
 
 ### Offline demo (no model, no services)
 
 ```powershell
 alfred demo-roundtrip --fake       # one validated structured call, dry-run model
-alfred chat --fake                 # terminal REPL; commands, routing, governance all live
-alfred agents list                 # show the discovered agent folders
+alfred chat --fake                 # terminal REPL; commands, routing, builder, governance all live
+alfred agents list                 # the discovered agent folders, lifecycle color-coded
 ```
 
 ### Real brain

@@ -5,12 +5,27 @@ description = "ALFRED: a self-hosted, local-first, multi-agent life-optimization
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+keywords = ["self-hosted", "local-first", "agents", "llm", "ollama", "life-optimization", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "ollama>=0.4.0",
     "discord.py>=2.4",
+    "rich>=13.7",
 ]
+
+[project.urls]
+Repository = "https://github.com/ChinmayGit8765/AlfredOpenSource"
+Issues = "https://github.com/ChinmayGit8765/AlfredOpenSource/issues"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2"]
