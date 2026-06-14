@@ -96,3 +96,61 @@ async def test_send_to_finished_channel_is_dropped_not_raised(
 ) -> None:
     adapter = make_adapter(monkeypatch)
     await adapter.send(OutboundMessage(channel="http:gone", text="late reply"))
+
+
+def make_capturing_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[HttpTransportAdapter, list[InboundMessage]]:
+    monkeypatch.setenv("ALFRED_HTTP_TOKEN", TOKEN)
+    received: list[InboundMessage] = []
+
+    async def handler(message: InboundMessage) -> None:
+        received.append(message)
+
+    return HttpTransportAdapter(HttpConfig(enabled=True), handler), received
+
+
+async def test_provenance_defaults_to_owner_but_can_be_marked_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, received = make_capturing_adapter(monkeypatch)
+    client = TestClient(TestServer(adapter.make_app()))
+    await client.start_server()
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    try:
+        await client.post("/message", json={"text": "hi"}, headers=auth)
+        assert received[-1].provenance == "owner"  # direct owner typing
+
+        await client.post(
+            "/message",
+            json={"text": "forwarded email body", "provenance": "external"},
+            headers=auth,
+        )
+        # Forwarded third-party content keeps the untrusted-content gate.
+        assert received[-1].provenance == "external"
+
+        # An unknown provenance is rejected, not silently coerced to owner.
+        bad = await client.post(
+            "/message",
+            json={"text": "hi", "provenance": "scheduler"},
+            headers=auth,
+        )
+        assert bad.status == 400
+    finally:
+        await client.close()
+
+
+async def test_empty_or_missing_text_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, received = make_capturing_adapter(monkeypatch)
+    client = TestClient(TestServer(adapter.make_app()))
+    await client.start_server()
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    try:
+        for body in ({"text": "   "}, {}, {"text": 5}):
+            response = await client.post("/message", json=body, headers=auth)
+            assert response.status == 400
+        assert received == []  # nothing reached the core
+    finally:
+        await client.close()

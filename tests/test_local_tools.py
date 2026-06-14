@@ -287,6 +287,34 @@ async def test_log_note_empty_text_fails():
 
 
 # ---------------------------------------------------------------------------
+# memory tools: remember_fact / recall_memories
+# ---------------------------------------------------------------------------
+
+
+async def test_remember_then_recall_through_the_tool_interface():
+    # The agent-facing contract (arg mapping and result shaping) for the two
+    # memory tools, exercised through invoke rather than only listed.
+    adapter, _, _ = make_adapter()
+
+    filed = await adapter.invoke(
+        "remember_fact",
+        {"text": "physio said no overhead pressing until March", "kind": "fact"},
+    )
+    assert filed.ok is True
+    assert filed.content["filed"] == "physio said no overhead pressing until March"
+    memory_id = filed.content["id"]
+
+    found = await adapter.invoke("recall_memories", {"query": "overhead pressing"})
+    assert found.ok is True
+    assert isinstance(found.content, list) and len(found.content) == 1
+    hit = found.content[0]
+    assert hit["id"] == memory_id
+    assert set(hit) == {"id", "kind", "text", "when"}
+    assert hit["kind"] == "fact"
+    assert "overhead pressing" in hit["text"]
+
+
+# ---------------------------------------------------------------------------
 # invoke error handling
 # ---------------------------------------------------------------------------
 

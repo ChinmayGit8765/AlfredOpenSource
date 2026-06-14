@@ -11,6 +11,12 @@ usual, the adapter captures sends addressed to the request's channel, and
 the HTTP response carries them. Proactive sends to "http:" channels after
 the request has completed have nowhere to go and are dropped with a log;
 proactive output belongs on a persistent transport (Discord, Telegram).
+
+The body is {"text": "..."} with an optional "provenance": "owner" |
+"external". It defaults to owner (direct owner typing); automation that
+forwards third-party content (an email body, a calendar invite) must set
+"external" so the untrusted-content gate applies and the forwarded text
+cannot run a command or auto-execute anything above read-only.
 """
 
 from __future__ import annotations
@@ -89,13 +95,23 @@ class HttpTransportAdapter:
             return web.json_response(
                 {"error": 'body must be {"text": "..."}'}, status=400
             )
+        # Direct owner typing is owner-authority, but automation forwarding
+        # third-party content (an email body, a calendar invite) MUST mark it
+        # external so the untrusted-content gate applies: external content can
+        # never run an owner command, approve a proposal, or auto-execute
+        # anything above read-only.
+        provenance = payload.get("provenance", "owner")
+        if provenance not in ("owner", "external"):
+            return web.json_response(
+                {"error": 'provenance must be "owner" or "external"'}, status=400
+            )
 
         channel = f"{CHANNEL_PREFIX}{new_id()}"
         self._buffers[channel] = []
         try:
             async with self._handler_lock:
                 await self._handler(
-                    InboundMessage(channel=channel, text=text, provenance="owner")
+                    InboundMessage(channel=channel, text=text, provenance=provenance)
                 )
             replies = self._buffers.get(channel, [])
         finally:

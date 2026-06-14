@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import httpx
 import pytest
 
 from alfred.adapters.telegram_transport import (
@@ -12,6 +14,7 @@ from alfred.adapters.telegram_transport import (
     to_inbound,
 )
 from alfred.config import TelegramConfig
+from alfred.domain.schemas import InboundMessage
 from alfred.errors import TransportError
 from alfred.ports.transport import OutboundMessage
 
@@ -60,12 +63,14 @@ class StubClient:
 
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict[str, Any]]] = []
+        self.post_status = 200
 
     async def post(self, url: str, json: dict[str, Any]) -> Any:
         self.posts.append((url, json))
+        status = self.post_status
 
         class _Response:
-            status_code = 200
+            status_code = status
 
         return _Response()
 
@@ -112,3 +117,104 @@ async def test_send_rejects_garbage_channel(monkeypatch: pytest.MonkeyPatch) -> 
     adapter, _ = make_adapter(monkeypatch)
     with pytest.raises(TransportError):
         await adapter.send(OutboundMessage(channel="telegram:not-a-chat", text="hi"))
+
+
+async def test_send_raises_on_non_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, stub = make_adapter(monkeypatch)
+    stub.post_status = 500
+    with pytest.raises(TransportError):
+        await adapter.send(OutboundMessage(channel="telegram:4242", text="hi"))
+
+
+# --- polling: getUpdates and the start() loop ------------------------------
+
+
+class _Response:
+    def __init__(self, payload: dict[str, Any], status: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("error", request=None, response=None)  # type: ignore[arg-type]
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class PollStub:
+    """get() yields scripted batches then cancels the loop; post() is a no-op."""
+
+    def __init__(self, batches: list[dict[str, Any]]) -> None:
+        self.batches = list(batches)
+        self.get_calls: list[dict[str, Any]] = []
+
+    async def get(self, url: str, params: dict[str, Any]) -> _Response:
+        self.get_calls.append(dict(params))
+        if not self.batches:
+            raise asyncio.CancelledError  # break the otherwise-infinite loop
+        return _Response(self.batches.pop(0))
+
+    async def aclose(self) -> None:
+        pass
+
+
+def make_poll_adapter(
+    monkeypatch: pytest.MonkeyPatch, batches: list[dict[str, Any]]
+) -> tuple[TelegramTransportAdapter, PollStub, list[InboundMessage]]:
+    monkeypatch.setenv("ALFRED_TELEGRAM_TOKEN", "test-token")
+    stub = PollStub(batches)
+    received: list[InboundMessage] = []
+
+    async def handler(msg: InboundMessage) -> None:
+        received.append(msg)
+
+    adapter = TelegramTransportAdapter(
+        TelegramConfig(enabled=True, owner_id=OWNER),
+        handler,
+        client=stub,  # type: ignore[arg-type]
+    )
+    return adapter, stub, received
+
+
+async def test_get_updates_raises_when_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, _, _ = make_poll_adapter(
+        monkeypatch, [{"ok": False, "description": "unauthorized"}]
+    )
+    with pytest.raises(TransportError):
+        await adapter._get_updates()
+
+
+async def test_poll_dispatches_owner_update_and_advances_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, stub, received = make_poll_adapter(
+        monkeypatch, [{"ok": True, "result": [update(update_id=42)]}]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.start()  # cancels itself after draining the one batch
+
+    assert len(received) == 1 and received[0].channel == "telegram:4242"
+    assert adapter._offset == 43  # update_id + 1
+    # The next poll carried the advanced offset so an update is never re-fired.
+    assert stub.get_calls[1]["offset"] == 43
+
+
+async def test_poll_swallows_a_failing_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALFRED_TELEGRAM_TOKEN", "test-token")
+    stub = PollStub([{"ok": True, "result": [update(update_id=7)]}])
+
+    async def handler(_msg: InboundMessage) -> None:
+        raise RuntimeError("handler blew up")
+
+    adapter = TelegramTransportAdapter(
+        TelegramConfig(enabled=True, owner_id=OWNER), handler, client=stub  # type: ignore[arg-type]
+    )
+
+    # A crashing handler must not kill the poll loop; the offset still advances.
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.start()
+    assert adapter._offset == 8
