@@ -254,7 +254,9 @@ async def test_capacity_refusal_then_force_override() -> None:
     doc = await reload(store, session.id)
     assert doc["stage"] == "capacity_check"
 
-    # A non-committal answer leaves the choice with the owner.
+    # Any non-force message is treated as revision feedback. Here the model
+    # re-emits the same oversized blueprint, so it still does not fit and we
+    # stay at the capacity check rather than wedging.
     session, message = await builder.step(session.id, "hmm, what are my options?", registry)
     assert session.stage is BuilderStage.CAPACITY_CHECK
 
@@ -262,6 +264,44 @@ async def test_capacity_refusal_then_force_override() -> None:
     session, message = await builder.step(session.id, "force", registry)
     assert session.stage is BuilderStage.AWAITING_APPROVAL
     assert "Proposal" in message
+
+
+async def test_capacity_check_revises_to_fit() -> None:
+    # The refusal invites the owner to "drop or shrink something". A shrink
+    # request must actually revise the blueprint, not leave the owner stuck
+    # between forcing past capacity and cancelling.
+    small = blueprint_json(
+        name="phone-curfew", description="One minute of wind-down."
+    )
+    # The shrunk design carries a cost of 1 (enforced floor for a habit), so
+    # 18 active + 1 == 19 <= 20 and it fits.
+    small = json.loads(small)
+    small["manifest"]["capacity_cost"] = 1
+    small = json.dumps(small)
+    builder, _, store = make_builder(
+        weekly_capacity=20, responses=list(HAPPY_SCRIPT) + [small]
+    )
+    registry = AgentRegistry(
+        [
+            make_agent("training", Lifecycle.ESTABLISHED, TargetShape.SKILL, capacity=10),
+            make_agent("study", Lifecycle.ESTABLISHED, TargetShape.PROJECT, capacity=8),
+        ]
+    )
+    session, _ = await builder.start("read more", registry)
+    session, _ = await builder.step(session.id, "I doomscroll at night", registry)
+    session, message = await builder.step(session.id, "build it", registry)
+    assert session.stage is BuilderStage.CAPACITY_CHECK
+    assert "does not fit" in message
+
+    session, message = await builder.step(
+        session.id, "make it much smaller then", registry
+    )
+
+    assert session.stage is BuilderStage.AWAITING_APPROVAL
+    assert "Revised." in message
+    assert "Proposal" in message
+    assert session.blueprint is not None
+    assert session.blueprint.manifest.capacity_cost == 1
 
 
 # --- approval, revision, rejection ----------------------------------------------
@@ -321,6 +361,25 @@ async def test_rejection_abandons_session() -> None:
     assert doc["stage"] == "abandoned"
     # No guilt in the goodbye.
     assert "no harm done" in message.lower()
+
+
+async def test_cancel_keyword_abandons_mid_build() -> None:
+    # A cancel word works at any stage (distinct from a bare "no", which is
+    # an approval-stage rejection), so a session can never wedge the chat.
+    builder, _, store = make_builder(responses=list(HAPPY_SCRIPT))
+    registry = AgentRegistry()
+    session, _ = await builder.start("read more", registry)
+    session, _ = await builder.step(session.id, "I doomscroll at night", registry)
+    assert session.stage is BuilderStage.DESIGNING  # mid-build, not at approval
+
+    session, message = await builder.step(session.id, "never mind", registry)
+
+    assert session.stage is BuilderStage.ABANDONED
+    assert "no harm done" in message.lower()
+    doc = await reload(store, session.id)
+    assert doc["stage"] == "abandoned"
+    # The abandoned session no longer intercepts later messages.
+    assert await builder.active_session() is None
 
 
 # --- session lookups -------------------------------------------------------------

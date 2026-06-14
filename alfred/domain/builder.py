@@ -397,6 +397,13 @@ class AgentBuilder:
             session.stage = BuilderStage.DESIGNING
             return "I lost the draft blueprint; tell me to design again."
 
+        # An owner message here that is neither the internal re-check (empty)
+        # nor the explicit "force" override is revision feedback: shrink or
+        # drop to fit, exactly what the refusal invites. Without this the
+        # owner would be wedged between forcing past capacity and cancelling.
+        if owner_message.strip() and _normalise(owner_message) != "force":
+            return await self._revise(session, owner_message, registry)
+
         # The override must be the whole message: "force" deliberately typed,
         # never a substring of something like "don't force it".
         forced = _normalise(owner_message) == "force"
@@ -456,6 +463,18 @@ class AgentBuilder:
                 "good outcome too. Come back to it whenever it earns its place."
             )
 
+        return await self._revise(session, owner_message, registry)
+
+    async def _revise(
+        self, session: BuilderSession, owner_message: str, registry: AgentRegistry
+    ) -> str:
+        """Revise the current blueprint per the owner's feedback, then re-check.
+
+        Shared by the approval stage and the capacity-check stage so an owner
+        can shrink or drop to fit at either point.
+        """
+        blueprint = session.blueprint
+        assert blueprint is not None  # callers guarantee this
         revised = await structured_call(
             self._model,
             schema=AgentBlueprint,
