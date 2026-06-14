@@ -17,6 +17,7 @@ from alfred.domain.schemas import (
     Collections,
     PendingAction,
     Proposal,
+    ProposalKind,
     Provenance,
     ToolCall,
 )
@@ -169,9 +170,18 @@ class Proposals:
     async def create(self, proposal: Proposal) -> Proposal:
         # Force pending regardless of what the caller set: no proposal,
         # least of all a touches_safety one, is ever born pre-approved.
-        stamped = proposal.model_copy(
-            update={"status": "pending", "created_at": self._clock.now()}
-        )
+        update: dict[str, Any] = {"status": "pending", "created_at": self._clock.now()}
+        # touches_safety must not depend on a model- or caller-supplied flag:
+        # a manifest change whose new value alters the tool allowlist always
+        # touches safety, so the double-confirmation gate cannot be bypassed
+        # by a mis-flagged proposal.
+        if (
+            proposal.kind is ProposalKind.MANIFEST_CHANGE
+            and proposal.new
+            and "allowed_tools" in proposal.new
+        ):
+            update["touches_safety"] = True
+        stamped = proposal.model_copy(update=update)
         await self._save(stamped)
         await audit(
             self._store,

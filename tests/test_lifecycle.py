@@ -113,6 +113,16 @@ def test_promotion_to_established(state: Lifecycle) -> None:
 
 
 @pytest.mark.parametrize("state", [Lifecycle.FORMING, Lifecycle.RESHAPED])
+def test_skips_do_not_manufacture_promotion(state: Lifecycle) -> None:
+    # 12 skips + 2 dones: total is 14 and rate is 1.0, but only 2 real
+    # completions. Deliberate skips are not evidence the habit formed, so
+    # the engaged count (2) keeps it below the threshold.
+    s = stats(done=2, skipped=12)
+    assert s.total == 14 and s.rate == 1.0 and s.engaged == 2
+    assert next_lifecycle(state, s) is state
+
+
+@pytest.mark.parametrize("state", [Lifecycle.FORMING, Lifecycle.RESHAPED])
 def test_no_promotion_below_boundaries(state: Lifecycle) -> None:
     # One outcome short of the count threshold.
     assert next_lifecycle(state, stats(done=13)) is state

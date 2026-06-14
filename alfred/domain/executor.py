@@ -134,7 +134,7 @@ class AgentExecutor:
                 result.observations.append(note)
 
             if reply.plan is not None:
-                result.plan = await self._stamp_and_persist_plan(reply.plan, name)
+                result.plan = self._stamp_plan(reply.plan, name)
 
             conversation.append(ModelMessage(role="user", content=current_user))
             conversation.append(
@@ -159,6 +159,14 @@ class AgentExecutor:
             result.replies.append(
                 f"Note: this run stopped at its round limit ({max_rounds} "
                 "rounds) before the agent reported completion."
+            )
+
+        # Persist the plan once per run, after the rounds settle. Persisting
+        # inside the loop appended a duplicate document whenever the model
+        # re-emitted its plan in a later round (common after tool results).
+        if result.plan is not None:
+            await self._store.append(
+                Collections.PLANS, result.plan.model_dump(mode="json")
             )
 
         audit_data: dict[str, object] = {
@@ -271,16 +279,12 @@ class AgentExecutor:
             return f"Tool '{call.tool}' result: {outcome.result.model_dump_json()}"
         return f"Tool '{call.tool}' produced no result."
 
-    async def _stamp_and_persist_plan(self, plan: Plan, agent_name: str) -> Plan:
+    def _stamp_plan(self, plan: Plan, agent_name: str) -> Plan:
         now = self._clock.now()
         week_of = plan.week_of
         if week_of is None:
             today = now.date()
             week_of = today - timedelta(days=today.weekday())
-        stamped = plan.model_copy(
+        return plan.model_copy(
             update={"agent": agent_name, "created_at": now, "week_of": week_of}
         )
-        # append, not put: time-ordered store keys are what make
-        # newest_first queries (latest plan, list_plans tool) actually work.
-        await self._store.append(Collections.PLANS, stamped.model_dump(mode="json"))
-        return stamped

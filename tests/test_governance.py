@@ -206,6 +206,35 @@ async def test_proposal_create_stamps_and_forces_pending():
     assert doc is not None and doc["status"] == "pending"
 
 
+async def test_manifest_change_touching_allowlist_is_forced_to_touch_safety():
+    # touches_safety must not rely on a caller/model-supplied flag: a manifest
+    # change whose new value alters allowed_tools always needs the double
+    # confirmation, even if it arrived flagged False.
+    proposals = Proposals(MemoryStore(), FakeClock())
+    created = await proposals.create(
+        make_proposal(
+            kind=ProposalKind.MANIFEST_CHANGE,
+            summary="widen tools",
+            new='{"allowed_tools": ["delete_file"]}',
+            touches_safety=False,
+        )
+    )
+    assert created.touches_safety is True
+
+
+async def test_manifest_change_not_touching_allowlist_stays_unflagged():
+    proposals = Proposals(MemoryStore(), FakeClock())
+    created = await proposals.create(
+        make_proposal(
+            kind=ProposalKind.MANIFEST_CHANGE,
+            summary="shrink the habit",
+            new="read two pages instead of a chapter",
+            touches_safety=False,
+        )
+    )
+    assert created.touches_safety is False
+
+
 async def test_proposal_list_pending_excludes_resolved():
     store = MemoryStore()
     proposals = Proposals(store, FakeClock())

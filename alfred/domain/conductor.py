@@ -162,7 +162,10 @@ def _detect_week_conflicts(plans: list[Plan], weekly_capacity: int) -> list[Conf
             if start is None:
                 continue
             duration = item.duration_min if item.duration_min is not None else 60
-            timed.append((start, start + duration, plan, item))
+            # A zero-length window can never overlap anything; give an explicit
+            # zero-duration item a one-minute footprint so two commitments at
+            # the same minute still register as a collision.
+            timed.append((start, start + max(duration, 1), plan, item))
         timed.sort(key=lambda entry: (entry[0], entry[1], entry[3].id))
         for i in range(len(timed)):
             for j in range(i + 1, len(timed)):

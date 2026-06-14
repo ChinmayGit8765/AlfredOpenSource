@@ -315,16 +315,24 @@ class AdherenceStats(BaseModel):
         return self.done + self.partial + self.missed + self.skipped
 
     @property
+    def engaged(self) -> int:
+        """Outcomes that signal automaticity; deliberate skips excluded.
+
+        This, not total, is the right maturity count: a habit the owner
+        mostly skipped has not formed, however high its rate looks.
+        """
+        return self.done + self.partial + self.missed
+
+    @property
     def rate(self) -> float:
         """Completion rate in [0, 1]; partial counts half.
 
         Skips are excluded from the denominator: skipping is a deliberate
         choice, not a lapse, so it never dilutes the rate.
         """
-        engaged = self.done + self.partial + self.missed
-        if engaged == 0:
+        if self.engaged == 0:
             return 0.0
-        return (self.done + 0.5 * self.partial) / engaged
+        return (self.done + 0.5 * self.partial) / self.engaged
 
 
 class UserProfile(BaseModel):

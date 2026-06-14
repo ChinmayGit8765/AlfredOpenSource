@@ -142,6 +142,28 @@ def test_missing_duration_defaults_to_60_minutes() -> None:
     assert [c.kind for c in conflicts] == ["time_collision"]
 
 
+def test_zero_duration_items_at_same_minute_collide() -> None:
+    # An explicit duration_min=0 is a valid value (ge=0). Two such items at
+    # the same minute must still register as a collision rather than slipping
+    # through a zero-length window.
+    plans = [
+        plan("training", [item("a1", day="mon", time="09:00", duration_min=0)]),
+        plan("study", [item("b1", day="mon", time="09:00", duration_min=0)]),
+    ]
+    conflicts = detect_conflicts(plans, 20)
+    assert [c.kind for c in conflicts] == ["time_collision"]
+
+
+def test_zero_duration_item_does_not_collide_at_a_neighbour_boundary() -> None:
+    # A zero-duration marker at the exact end of another item is back-to-back,
+    # not overlapping.
+    plans = [
+        plan("training", [item("a1", day="mon", time="09:00", duration_min=60)]),
+        plan("study", [item("b1", day="mon", time="10:00", duration_min=0)]),
+    ]
+    assert detect_conflicts(plans, 20) == []
+
+
 def test_collision_requires_both_items_timed() -> None:
     plans = [
         plan("training", [item("a1", day="mon", time="09:00", duration_min=60)]),

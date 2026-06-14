@@ -120,6 +120,36 @@ async def test_plan_is_stamped_persisted_and_week_of_defaults_to_monday():
     assert runs[0]["plan_id"] == result.plan.id
 
 
+async def test_plan_re_emitted_across_rounds_is_persisted_once():
+    # A plan in round 1 (done=False, with a tool call) followed by the same
+    # plan re-emitted in round 2 must leave exactly one Plan document, not a
+    # duplicate per round.
+    tools = FakeTools()
+    tools.add(READ_TOOL, tier=CapabilityTier.READ_ONLY)
+    plan = Plan(items=[PlanItem(title="run 5k", day="wed", load=2)])
+    model = FakeModel(
+        [
+            reply_json(
+                reply="working on it",
+                plan=plan.model_dump(mode="json"),
+                done=False,
+                tool_calls=[{"tool": READ_TOOL, "args": {}}],
+            ),
+            reply_json(reply="done", plan=plan.model_dump(mode="json"), done=True),
+        ]
+    )
+    executor, store, _, _ = make_executor(model, tools=tools)
+
+    result = await executor.run(
+        make_agent(allowed=[READ_TOOL]), text="plan my week", provenance="owner"
+    )
+
+    assert len(model.calls) == 2  # two rounds ran
+    assert result.plan is not None
+    docs = await store.query(Collections.PLANS)
+    assert len(docs) == 1  # not two
+
+
 async def test_explicit_week_of_is_preserved():
     plan = Plan(week_of=date(2026, 2, 2), items=[PlanItem(title="read")])
     model = FakeModel([reply_json(plan=plan.model_dump(mode="json"))])

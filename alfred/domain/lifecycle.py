@@ -63,13 +63,15 @@ def next_lifecycle(state: Lifecycle, stats: AdherenceStats) -> Lifecycle:
     # signal to diagnose, regardless of how good the long-run rate looks.
     if state in _ACTIVE and stats.consecutive_misses >= 2:
         return Lifecycle.LAPSING
+    # Maturity gates count engaged outcomes, not total: deliberate skips are
+    # not evidence a habit has formed, so they cannot manufacture promotion.
     if (
         state in (Lifecycle.FORMING, Lifecycle.RESHAPED)
-        and stats.total >= 14
+        and stats.engaged >= 14
         and stats.rate >= 0.8
     ):
         return Lifecycle.ESTABLISHED
-    if state is Lifecycle.ESTABLISHED and stats.total >= 30 and stats.rate >= 0.85:
+    if state is Lifecycle.ESTABLISHED and stats.engaged >= 30 and stats.rate >= 0.85:
         return Lifecycle.MAINTENANCE
     if state is Lifecycle.LAPSING and stats.consecutive_dones >= 3:
         # Recovered: three real completions in a row, per the binding
