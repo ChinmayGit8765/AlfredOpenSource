@@ -20,6 +20,7 @@ from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.feedback import adherence_signal, parse_outcome_report
 from alfred.domain.governance import PendingActions, Proposals, audit
+from alfred.domain.lifecycle import LapseDoctor, lapse_proposal
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry, LoadedAgent
@@ -31,6 +32,7 @@ from alfred.domain.schemas import (
     Collections,
     ExecutionResult,
     InboundMessage,
+    LapseDiagnosis,
     Lifecycle,
     Outcome,
     Plan,
@@ -93,6 +95,7 @@ class AlfredCore:
         pending: PendingActions,
         proposals: Proposals,
         reflection: ReflectionEngine,
+        lapse_doctor: LapseDoctor,
         store: StorePort,
         clock: ClockPort,
         transport: TransportPort,
@@ -109,6 +112,7 @@ class AlfredCore:
         self._pending = pending
         self._proposals = proposals
         self._reflection = reflection
+        self._lapse_doctor = lapse_doctor
         self._store = store
         self._clock = clock
         self._transport = transport
@@ -170,6 +174,18 @@ class AlfredCore:
                 trigger.reason,
             )
             return
+
+        # A lapsing agent gets a diagnosis, not a nag. LAPSING is only reached
+        # at two consecutive misses, so a check-in here is the spec's "run a
+        # short diagnostic, then shrink/re-anchor/pause/reshape/retire" loop,
+        # never a generic prod.
+        if (
+            trigger.reason == "check_in"
+            and agent.manifest.lifecycle is Lifecycle.LAPSING
+        ):
+            await self._diagnose_lapse(agent, channel)
+            return
+
         text = _CHECK_IN_TEXT if trigger.reason == "check_in" else _PLANNING_TEXT
         result = await self._executor.run(agent, text=text, provenance="scheduler")
         if channel is not None:
@@ -191,6 +207,57 @@ class AlfredCore:
                     await self._send_scheduled(
                         channel, self._render_schedule(schedule)
                     )
+
+    async def _diagnose_lapse(
+        self, agent: LoadedAgent, channel: str | None
+    ) -> None:
+        """Run the lapse doctor and surface one human-in-the-loop proposal.
+
+        A lapse is data, never a moral failure: the diagnosis names the
+        likely cause and recommends the smallest true fix, which becomes a
+        pending proposal the owner rules on. Nothing changes without approval.
+        Skipped while a proposal for this agent is already pending so the
+        daily LAPSING check-in cannot nag or pile up duplicate proposals.
+        """
+        name = agent.manifest.name
+        pending = await self._proposals.list_pending()
+        if any(p.agent == name for p in pending):
+            return
+
+        profile = await self._user_model.get_profile()
+        stats = profile.adherence.get(name, AdherenceStats())
+        recent = await self._user_model.recent_outcomes(agent=name, limit=5)
+        diagnosis = await self._lapse_doctor.diagnose(agent, stats, recent)
+
+        lines = [self._render_diagnosis(name, diagnosis)]
+        proposal = lapse_proposal(name, agent.manifest.lifecycle, diagnosis)
+        if proposal is not None:
+            created = await self._proposals.create(proposal)
+            suffix = " confirm-safety" if created.touches_safety else ""
+            lines.append(
+                f"I have a proposal ({created.id}): {created.summary}. Say "
+                f"'approve {created.id}{suffix}' if that lands, or "
+                f"'reject {created.id}'."
+            )
+        await self._send_scheduled(channel, "\n".join(lines))
+
+    @staticmethod
+    def _render_diagnosis(name: str, diagnosis: LapseDiagnosis) -> str:
+        cause_text = {
+            "too_big": "the habit may be too big right now",
+            "bad_cue": "the cue it is anchored to is not firing",
+            "life_event": "life got in the way, which is fair",
+            "wrong_goal": "this may not be a goal you actually want",
+            "unknown": "I am not sure why yet",
+        }.get(diagnosis.cause, diagnosis.cause)
+        lines = [
+            f"Checking in on {name}. A couple of misses is data, not a "
+            "failure, and none of it is held against you.",
+            f"My read: {cause_text}.",
+        ]
+        if diagnosis.detail:
+            lines.append(diagnosis.detail)
+        return "\n".join(lines)
 
     # --- commands ---------------------------------------------------------
 
@@ -476,6 +543,23 @@ class AlfredCore:
             return (
                 f"'{proposal.agent}' has its new prompt in memory only; "
                 "its folder is missing on disk."
+            )
+
+        if proposal.kind is ProposalKind.RETIRE_AGENT:
+            agent = self._registry.get(proposal.agent)
+            if agent is None:
+                return by_hand
+            old_state = agent.manifest.lifecycle.value
+            agent.manifest.lifecycle = Lifecycle.RETIRED
+            on_disk = self._write_manifest(agent)
+            await self._record_application(proposal, old=old_state)
+            return (
+                f"'{proposal.agent}' is retired, with thanks for the data it gave"
+                + (
+                    "."
+                    if on_disk
+                    else " (in memory only; its folder is missing on disk)."
+                )
             )
 
         return by_hand

@@ -13,7 +13,14 @@ import logging
 from datetime import timedelta
 
 from alfred.domain.registry import LoadedAgent
-from alfred.domain.schemas import AdherenceStats, LapseDiagnosis, Lifecycle, Outcome
+from alfred.domain.schemas import (
+    AdherenceStats,
+    LapseDiagnosis,
+    Lifecycle,
+    Outcome,
+    Proposal,
+    ProposalKind,
+)
 from alfred.domain.structured import structured_call
 from alfred.ports import ClockPort, ModelPort
 
@@ -69,6 +76,67 @@ def next_lifecycle(state: Lifecycle, stats: AdherenceStats) -> Lifecycle:
         # contract. Rebuild gently from FORMING rather than jumping back.
         return Lifecycle.FORMING
     return state
+
+
+def lapse_proposal(
+    agent_name: str, current: Lifecycle, diagnosis: LapseDiagnosis
+) -> Proposal | None:
+    """Translate a lapse diagnosis into one human-in-the-loop proposal.
+
+    The spec's lapse response set (shrink, re-anchor, pause, reshape, retire)
+    each becomes a pending Proposal the owner rules on; nothing here changes
+    an agent silently. 'hold' returns None: the diagnosis found nothing worth
+    changing yet (one miss is fine). Pause, reshape, and retire are lifecycle
+    moves the runtime can apply on approval; shrink and re-anchor reshape the
+    agent's design and are surfaced for the owner to apply by hand, carrying
+    the doctor's specific guidance.
+    """
+    if diagnosis.action == "hold":
+        return None
+    reason = diagnosis.detail or f"diagnosed cause: {diagnosis.cause}"
+    if diagnosis.action == "pause":
+        return Proposal(
+            kind=ProposalKind.LIFECYCLE_CHANGE,
+            agent=agent_name,
+            summary=f"Pause {agent_name} without guilt; revisit when it fits",
+            old=current.value,
+            new=Lifecycle.PAUSED.value,
+            reason=reason,
+        )
+    if diagnosis.action == "reshape":
+        return Proposal(
+            kind=ProposalKind.LIFECYCLE_CHANGE,
+            agent=agent_name,
+            summary=f"Reshape {agent_name} into something that fits",
+            old=current.value,
+            new=Lifecycle.RESHAPED.value,
+            reason=reason,
+        )
+    if diagnosis.action == "retire":
+        return Proposal(
+            kind=ProposalKind.RETIRE_AGENT,
+            agent=agent_name,
+            summary=f"Retire {agent_name} honestly; it no longer earns its place",
+            old=current.value,
+            new=Lifecycle.RETIRED.value,
+            reason=reason,
+        )
+    if diagnosis.action == "shrink":
+        target = diagnosis.new_size or "make the next step almost too small to fail"
+        return Proposal(
+            kind=ProposalKind.MANIFEST_CHANGE,
+            agent=agent_name,
+            summary=f"Shrink {agent_name}: {target}",
+            reason=reason,
+        )
+    # reanchor
+    target = diagnosis.new_anchor or "stack it onto a more reliable daily cue"
+    return Proposal(
+        kind=ProposalKind.PROMPT_CHANGE,
+        agent=agent_name,
+        summary=f"Re-anchor {agent_name}: {target}",
+        reason=reason,
+    )
 
 
 _LAPSE_SYSTEM = (

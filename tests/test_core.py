@@ -17,6 +17,7 @@ from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.governance import PendingActions, Policy, Proposals
+from alfred.domain.lifecycle import LapseDoctor
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry, LoadedAgent
 from alfred.domain.schemas import (
@@ -48,12 +49,13 @@ def make_agent(
     *,
     allowed_tools: list[str] | None = None,
     shape: TargetShape | None = TargetShape.SKILL,
+    lifecycle: Lifecycle = Lifecycle.ESTABLISHED,
 ) -> LoadedAgent:
     manifest = AgentManifest(
         name=name,
         description=f"{name} test agent",
         shape=shape,
-        lifecycle=Lifecycle.ESTABLISHED,
+        lifecycle=lifecycle,
         triggers=Triggers(keywords=keywords),
         allowed_tools=allowed_tools or [],
     )
@@ -90,6 +92,7 @@ class World:
     model: FakeModel
     builder: AgentBuilder
     agents_dir: Path
+    clock: FakeClock
 
 
 def make_world(
@@ -111,6 +114,7 @@ def make_world(
     conductor = Conductor(model, clock)
     builder = AgentBuilder(model, user_model, store, clock)
     reflection = ReflectionEngine(model, user_model, store, clock)
+    lapse_doctor = LapseDoctor(model, clock)
     agents_dir = tmp_path / "agents"
     config = AlfredConfig(data_dir=tmp_path / "data", agents_dir=agents_dir)
     core = AlfredCore(
@@ -123,6 +127,7 @@ def make_world(
         pending,
         proposals,
         reflection,
+        lapse_doctor,
         store,
         clock,
         transport,
@@ -141,6 +146,7 @@ def make_world(
         model=model,
         builder=builder,
         agents_dir=agents_dir,
+        clock=clock,
     )
 
 
@@ -449,6 +455,141 @@ async def test_run_scheduled_with_no_known_channel_drops_loudly(tmp_path: Path) 
     await world.core.run_scheduled(ScheduledTrigger(agent="training", reason="schedule"))
 
     assert world.transport.sent == []
+
+
+def lapse_diagnosis(
+    *, action: str, cause: str = "too_big", **extra: object
+) -> str:
+    return json.dumps(
+        {
+            "cause": cause,
+            "action": action,
+            "detail": "Two misses in a row; the ask may be too big right now.",
+            **extra,
+        }
+    )
+
+
+async def test_lapsing_agent_is_diagnosed_not_nagged(tmp_path: Path) -> None:
+    # A LAPSING check-in runs the lapse doctor and surfaces exactly one
+    # human-in-the-loop proposal; it never just prods the agent to run.
+    model = FakeModel([lapse_diagnosis(action="shrink", new_size="two minutes")])
+    world = make_world(
+        tmp_path,
+        model,
+        [make_agent("phone-curfew", ["phone"], shape=TargetShape.HABIT,
+                    lifecycle=Lifecycle.LAPSING)],
+    )
+    await world.core.handle_inbound(inbound("status"))  # sets last channel
+    world.transport.sent.clear()
+
+    await world.core.run_scheduled(
+        ScheduledTrigger(agent="phone-curfew", reason="check_in")
+    )
+
+    texts = sent_texts(world)
+    assert any("Checking in on phone-curfew" in t for t in texts)
+    assert any("data, not a" in t for t in texts)  # stance: lapse is data
+    pending = await world.proposals.list_pending()
+    assert len(pending) == 1
+    assert pending[0].kind is ProposalKind.MANIFEST_CHANGE  # shrink
+    # The diagnosis loop fired exactly one model call (no agent run).
+    assert len(world.model.calls) == 1
+
+
+async def test_lapse_proposal_not_repeated_while_one_is_pending(tmp_path: Path) -> None:
+    model = FakeModel([lapse_diagnosis(action="pause")])
+    world = make_world(
+        tmp_path,
+        model,
+        [make_agent("phone-curfew", ["phone"], shape=TargetShape.HABIT,
+                    lifecycle=Lifecycle.LAPSING)],
+    )
+    trigger = ScheduledTrigger(agent="phone-curfew", reason="check_in")
+
+    await world.core.run_scheduled(trigger)
+    await world.core.run_scheduled(trigger)  # would nag daily if unguarded
+
+    pending = await world.proposals.list_pending()
+    assert len(pending) == 1  # not two
+    # The second check-in short-circuits before any model call.
+    assert len(world.model.calls) == 1
+
+
+async def test_run_scheduled_reflection_sends_review(tmp_path: Path) -> None:
+    reflection_json = json.dumps(
+        {"insights": ["You plan best on weekday mornings."],
+         "profile_updates": [], "proposals": []}
+    )
+    model = FakeModel([reflection_json])
+    world = make_world(tmp_path, model, [make_agent("training", ["train"])])
+    await world.core.handle_inbound(inbound("status"))
+    world.transport.sent.clear()
+
+    await world.core.run_scheduled(ScheduledTrigger(agent="", reason="reflection"))
+
+    assert any("Reflection over the last" in t for t in sent_texts(world))
+
+
+async def test_run_scheduled_check_in_non_lapsing_runs_agent(tmp_path: Path) -> None:
+    # A non-lapsing check-in still routes through the agent run (the nag-free
+    # check-in text), not the lapse doctor.
+    model = FakeModel([agent_reply("How did the week go?")])
+    world = make_world(
+        tmp_path, model, [make_agent("training", ["train"], allowed_tools=TRAINING_TOOLS)]
+    )
+    await world.core.handle_inbound(inbound("status"))
+    world.transport.sent.clear()
+
+    await world.core.run_scheduled(
+        ScheduledTrigger(agent="training", reason="check_in")
+    )
+
+    assert any("How did the week go?" in t for t in sent_texts(world))
+    assert await world.proposals.list_pending() == []
+
+
+async def test_run_scheduled_unknown_agent_is_skipped(tmp_path: Path) -> None:
+    model = FakeModel([agent_reply("unused")])
+    world = make_world(tmp_path, model, [make_agent("training", ["train"])])
+
+    await world.core.run_scheduled(
+        ScheduledTrigger(agent="ghost", reason="check_in")
+    )
+
+    assert world.transport.sent == []
+    assert world.model.calls == []  # the agent never ran
+
+
+async def test_scheduled_runs_reconcile_into_one_week(tmp_path: Path) -> None:
+    # Staggered scheduled planning runs for two agents land in one coherent
+    # week: the second run, seeing two plans for the same week, reconciles
+    # and persists a schedule. This is the scheduled path, distinct from the
+    # interactive "plan my week" reconciliation.
+    plan_a = {"items": [{"title": "Easy run", "day": "tue", "load": 1}]}
+    plan_b = {"items": [{"title": "Revise", "day": "wed", "load": 1}]}
+    model = FakeModel(
+        [agent_reply("A planned.", plan=plan_a), agent_reply("B planned.", plan=plan_b)]
+    )
+    world = make_world(
+        tmp_path,
+        model,
+        [
+            make_agent("training", ["train"], allowed_tools=TRAINING_TOOLS),
+            make_agent("study", ["study"], allowed_tools=TRAINING_TOOLS),
+        ],
+    )
+    await world.core.handle_inbound(inbound("status"))
+    world.transport.sent.clear()
+
+    await world.core.run_scheduled(ScheduledTrigger(agent="training", reason="schedule"))
+    assert await world.store.query(Collections.SCHEDULES) == []  # only one plan so far
+
+    await world.core.run_scheduled(ScheduledTrigger(agent="study", reason="schedule"))
+
+    schedules = await world.store.query(Collections.SCHEDULES)
+    assert len(schedules) == 1
+    assert len(schedules[0]["plans"]) == 2
 
 
 async def test_build_system_fake_smoke(tmp_path: Path) -> None:

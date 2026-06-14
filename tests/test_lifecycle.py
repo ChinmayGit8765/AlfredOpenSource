@@ -7,7 +7,12 @@ from datetime import timedelta
 
 import pytest
 
-from alfred.domain.lifecycle import LapseDoctor, check_in_interval, next_lifecycle
+from alfred.domain.lifecycle import (
+    LapseDoctor,
+    check_in_interval,
+    lapse_proposal,
+    next_lifecycle,
+)
 from alfred.domain.registry import LoadedAgent
 from alfred.domain.schemas import (
     AdherenceStats,
@@ -16,6 +21,7 @@ from alfred.domain.schemas import (
     Lifecycle,
     Outcome,
     OutcomeStatus,
+    ProposalKind,
     TargetShape,
 )
 from alfred.testing import FakeClock, FakeModel
@@ -255,3 +261,59 @@ async def test_lapse_doctor_retirement_is_reachable() -> None:
     )
     assert diagnosis.action == "retire"
     assert diagnosis.cause == "wrong_goal"
+
+
+# --- lapse_proposal ---------------------------------------------------------
+
+
+def _diagnosis(action: str, **extra: object) -> LapseDiagnosis:
+    return LapseDiagnosis(cause="too_big", action=action, detail="d", **extra)  # type: ignore[arg-type]
+
+
+def test_hold_produces_no_proposal() -> None:
+    # One miss is fine: 'hold' means nothing is worth changing yet.
+    assert lapse_proposal("reading", Lifecycle.LAPSING, _diagnosis("hold")) is None
+
+
+@pytest.mark.parametrize(
+    ("action", "kind", "new_state"),
+    [
+        ("pause", ProposalKind.LIFECYCLE_CHANGE, Lifecycle.PAUSED),
+        ("reshape", ProposalKind.LIFECYCLE_CHANGE, Lifecycle.RESHAPED),
+        ("retire", ProposalKind.RETIRE_AGENT, Lifecycle.RETIRED),
+    ],
+)
+def test_lifecycle_actions_map_to_proposals(
+    action: str, kind: ProposalKind, new_state: Lifecycle
+) -> None:
+    proposal = lapse_proposal("reading", Lifecycle.LAPSING, _diagnosis(action))
+    assert proposal is not None
+    assert proposal.kind is kind
+    assert proposal.agent == "reading"
+    assert proposal.old == Lifecycle.LAPSING.value
+    assert proposal.new == new_state.value
+    assert not proposal.touches_safety  # lifecycle moves never touch safety
+
+
+def test_reshape_action_makes_reshaped_reachable() -> None:
+    # RESHAPED has no automatic producer except the lapse loop; this is it.
+    proposal = lapse_proposal("reading", Lifecycle.LAPSING, _diagnosis("reshape"))
+    assert proposal is not None and proposal.new == Lifecycle.RESHAPED.value
+
+
+def test_shrink_and_reanchor_carry_doctor_guidance() -> None:
+    shrink = lapse_proposal(
+        "reading", Lifecycle.LAPSING, _diagnosis("shrink", new_size="read two pages")
+    )
+    assert shrink is not None
+    assert shrink.kind is ProposalKind.MANIFEST_CHANGE
+    assert "read two pages" in shrink.summary
+
+    reanchor = lapse_proposal(
+        "reading",
+        Lifecycle.LAPSING,
+        _diagnosis("reanchor", new_anchor="after brushing teeth"),
+    )
+    assert reanchor is not None
+    assert reanchor.kind is ProposalKind.PROMPT_CHANGE
+    assert "after brushing teeth" in reanchor.summary

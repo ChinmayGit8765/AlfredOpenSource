@@ -27,6 +27,7 @@ from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.governance import PendingActions, Policy, Proposals
+from alfred.domain.lifecycle import LapseDoctor
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry
@@ -272,6 +273,7 @@ class ComposedSystem:
     conductor: Conductor
     builder: AgentBuilder
     reflection: ReflectionEngine
+    lapse_doctor: LapseDoctor
     core: AlfredCore
     heartbeat: Heartbeat
     transport: TransportPort
@@ -320,6 +322,7 @@ def build_system(
     conductor = Conductor(model, clock)
     builder = AgentBuilder(model, user_model, store, clock)
     reflection = ReflectionEngine(model, user_model, store, clock)
+    lapse_doctor = LapseDoctor(model, clock)
 
     core = AlfredCore(
         registry,
@@ -331,6 +334,7 @@ def build_system(
         pending,
         proposals,
         reflection,
+        lapse_doctor,
         store,
         clock,
         transport,
@@ -367,6 +371,7 @@ def build_system(
         conductor=conductor,
         builder=builder,
         reflection=reflection,
+        lapse_doctor=lapse_doctor,
         core=core,
         heartbeat=heartbeat,
         transport=transport,
