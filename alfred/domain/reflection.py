@@ -83,7 +83,7 @@ class ReflectionEngine:
             user=user,
         )
 
-        await self._apply_profile_updates(profile, reflection.profile_updates)
+        await self._apply_profile_updates(reflection.profile_updates)
 
         created: list[Proposal] = []
         created.extend(await self._lifecycle_proposals(registry, profile))
@@ -163,16 +163,17 @@ class ReflectionEngine:
         )
         return "\n".join(lines)
 
-    async def _apply_profile_updates(
-        self, profile: UserProfile, updates: list[str]
-    ) -> None:
+    async def _apply_profile_updates(self, updates: list[str]) -> None:
         if not updates:
             return
-        profile.notes.extend(updates)
-        # Keep the most recent notes only; the profile is a working summary,
-        # the full history lives in the observations log.
-        profile.notes = profile.notes[-_NOTES_CAP:]
-        await self._user_model.save_profile(profile)
+        # Re-read the profile inside the lock rather than writing back the
+        # snapshot taken before the (slow) model call: a concurrent outcome
+        # write that landed during the call must not be clobbered.
+        async with self._user_model.transaction() as profile:
+            profile.notes.extend(updates)
+            # Keep the most recent notes only; the profile is a working
+            # summary, the full history lives in the observations log.
+            profile.notes = profile.notes[-_NOTES_CAP:]
         for update in updates:
             await self._user_model.record_observation(
                 source="reflection", kind="insight", text=update

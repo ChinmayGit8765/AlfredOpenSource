@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from alfred.domain.feedback import adherence_signal
@@ -70,6 +72,22 @@ class UserModelService:
             Collections.PROFILE, _PROFILE_KEY, profile.model_dump(mode="json")
         )
 
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[UserProfile]:
+        """Atomic profile read-modify-write under the shared lock.
+
+        The lock is held across a FRESH read and the save, so concurrent
+        handlers (transport tasks and the heartbeat's reflection) cannot lose
+        each other's updates. Every read-modify-save of the profile must go
+        through here: holding the lock around only the save is not enough,
+        because a snapshot taken before a slow model call is already stale by
+        the time it is written back. Yields the current profile; saves on exit.
+        """
+        async with self._profile_lock:
+            profile = await self.get_profile()
+            yield profile
+            await self.save_profile(profile)
+
     async def record_observation(self, source: str, kind: str, text: str) -> Observation:
         observation = Observation.model_validate(
             {"source": source, "kind": kind, "text": text, "at": self._clock.now()}
@@ -84,8 +102,7 @@ class UserModelService:
             outcome.at = self._clock.now()
         await self._store.append(Collections.OUTCOMES, outcome.model_dump(mode="json"))
 
-        async with self._profile_lock:
-            profile = await self.get_profile()
+        async with self.transaction() as profile:
             stats = profile.adherence.setdefault(outcome.agent, AdherenceStats())
             if outcome.status is OutcomeStatus.DONE:
                 stats.done += 1
@@ -105,7 +122,7 @@ class UserModelService:
                 # SKIPPED is a deliberate choice, not a lapse: it neither
                 # increments nor resets either streak.
                 stats.skipped += 1
-            await self.save_profile(profile)
+            # transaction() saves on exit.
 
     async def recent_observations(self, limit: int = 20) -> list[Observation]:
         docs = await self._store.query(

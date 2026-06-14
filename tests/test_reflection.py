@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from alfred.domain.reflection import ReflectionEngine
@@ -17,6 +19,7 @@ from alfred.domain.schemas import (
     UserProfile,
 )
 from alfred.domain.user_model import UserModelService
+from alfred.ports.model import ModelMessage, ModelOptions
 from alfred.testing import FakeClock, FakeModel, MemoryStore
 
 
@@ -210,3 +213,60 @@ async def test_outcomes_outside_the_window_are_excluded():
     content = user_content(model)
     assert "recent" in content
     assert "ancient" not in content
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: reflection must not clobber a concurrent outcome write
+# ---------------------------------------------------------------------------
+
+
+class _BlockingModel:
+    """ModelPort whose call blocks until released, to force an interleaving.
+
+    Signals `started` when the (slow) model call begins, then waits for
+    `release` before returning, so a test can land a concurrent profile
+    write in the exact window between reflection's read and its save.
+    """
+
+    def __init__(self, response: str, started: asyncio.Event, release: asyncio.Event):
+        self._response = response
+        self._started = started
+        self._release = release
+
+    async def complete(
+        self,
+        messages: Sequence[ModelMessage],
+        *,
+        json_schema: Mapping[str, Any] | None = None,
+        options: ModelOptions | None = None,
+    ) -> str:
+        self._started.set()
+        await self._release.wait()
+        return self._response
+
+
+async def test_reflection_does_not_clobber_a_concurrent_outcome():
+    # The lost-update race: reflection reads the profile, makes a slow model
+    # call, then writes back. An outcome logged during that call bumps
+    # adherence under the lock; the fix re-reads inside the lock on save, so
+    # the increment survives instead of being overwritten by the stale snapshot.
+    started, release = asyncio.Event(), asyncio.Event()
+    model = _BlockingModel(reflection_json(profile_updates=["mornings work"]), started, release)
+    store = MemoryStore()
+    clock = FakeClock()
+    user_model = UserModelService(store, clock)
+    engine = ReflectionEngine(model, user_model, store, clock)
+    registry = AgentRegistry([make_agent("runner")])
+
+    async def concurrent_outcome() -> None:
+        await started.wait()  # reflection is now mid model-call, snapshot taken
+        await user_model.record_outcome(
+            Outcome(agent="runner", status=OutcomeStatus.DONE)
+        )
+        release.set()  # let reflection proceed to its save
+
+    await asyncio.gather(engine.reflect(registry), concurrent_outcome())
+
+    profile = await user_model.get_profile()
+    assert profile.adherence["runner"].done == 1  # the increment was not lost
+    assert "mornings work" in profile.notes  # and the reflection note landed
