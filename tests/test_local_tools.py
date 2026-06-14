@@ -9,6 +9,7 @@ import pytest
 from alfred.adapters.local_tools import LocalToolAdapter
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.governance import PendingActions, Policy
+from alfred.domain.memory import MemoryService
 from alfred.domain.registry import LoadedAgent
 from alfred.domain.schemas import (
     AdherenceStats,
@@ -40,7 +41,7 @@ EXPECTED_ORDER = [
 def make_adapter() -> tuple[LocalToolAdapter, MemoryStore, FakeClock]:
     store = MemoryStore()
     clock = FakeClock()
-    return LocalToolAdapter(store, clock), store, clock
+    return LocalToolAdapter(store, clock, MemoryService(store, clock)), store, clock
 
 
 async def seed_plan(

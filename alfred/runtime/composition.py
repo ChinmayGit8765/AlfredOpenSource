@@ -2,8 +2,11 @@
 
 build_system wires the whole brain from one AlfredConfig. Real mode uses
 sqlite and Ollama; fake mode swaps in the in-memory store and a DryRunModel
-so the entire pipeline runs offline. Nothing outside this module (and the
-CLI that drives it) constructs adapters or domain services.
+so the entire pipeline runs offline. build_model and build_transports are
+the factories the CLI uses for the construction it cannot get from
+build_system (the model probe, and transports that need the core's handler
+first). Nothing outside this module constructs an adapter or a domain
+service; the CLI only orchestrates what these factories return.
 """
 
 from __future__ import annotations
@@ -11,16 +14,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import os
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from alfred.adapters.discord_transport import DiscordTransportAdapter
+from alfred.adapters.http_transport import HttpTransportAdapter
 from alfred.adapters.local_tools import LocalToolAdapter
 from alfred.adapters.mcp_tools import CompositeToolAdapter, McpToolAdapter
 from alfred.adapters.ollama_model import OllamaModelAdapter
 from alfred.adapters.sqlite_store import SqliteStoreAdapter
+from alfred.adapters.telegram_transport import TelegramTransportAdapter
 from alfred.config import AlfredConfig
 from alfred.domain.builder import AgentBuilder
 from alfred.domain.conductor import Conductor
@@ -31,8 +38,9 @@ from alfred.domain.lifecycle import LapseDoctor
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry
+from alfred.domain.schemas import InboundMessage
 from alfred.domain.user_model import UserModelService
-from alfred.errors import ToolNotFoundError
+from alfred.errors import AlfredError, ToolNotFoundError
 from alfred.ports import (
     ModelMessage,
     ModelOptions,
@@ -388,3 +396,83 @@ async def connect_mcp(system: ComposedSystem) -> None:
     if not system.config.mcp_servers or system.mcp_slot is None:
         return
     system.mcp_slot.inner = await McpToolAdapter.connect(system.config.mcp_servers)
+
+
+def build_model(config: AlfredConfig) -> OllamaModelAdapter:
+    """The real model adapter, for the CLI's probe and demo paths.
+
+    build_system constructs its own model internally; this exists so the CLI
+    never has to instantiate an adapter itself. Returns the concrete adapter
+    so the probe can call ensure_model().
+    """
+    return OllamaModelAdapter(config.llm)
+
+
+@dataclass
+class TransportSetup:
+    """What build_transports decided: the wired transports plus CLI notes.
+
+    routes maps a channel prefix ("discord"/"telegram"/"http") to its
+    transport. notes are (level, message) lines for the CLI to render;
+    level is one of "step", "warn", "bad". Keeping the env-gating and
+    construction here means the CLI only renders and runs what it is given.
+    """
+
+    routes: dict[str, TransportPort] = field(default_factory=dict)
+    notes: list[tuple[str, str]] = field(default_factory=list)
+
+
+def build_transports(
+    config: AlfredConfig,
+    handler: Callable[[InboundMessage], Awaitable[None]],
+) -> TransportSetup:
+    """Construct every transport whose credentials are present.
+
+    The owner reaches the same brain from whichever channel is in reach. The
+    cyclic dependency (transports need the core's handler, the core needs a
+    transport) is broken by the SwitchableTransport slot build_system leaves;
+    the CLI swaps these routes into it after wiring.
+    """
+    setup = TransportSetup()
+
+    if os.environ.get(config.discord.token_env):
+        if config.discord.owner_id == 0:
+            setup.notes.append(
+                (
+                    "warn",
+                    "discord.owner_id is 0 (the default), so EVERY Discord "
+                    "message will be ignored. Set your user id in config/alfred.yaml.",
+                )
+            )
+        setup.routes["discord"] = DiscordTransportAdapter(config.discord, handler)
+        setup.notes.append(("step", "Discord gateway starting"))
+    else:
+        setup.notes.append(("step", f"Discord off ({config.discord.token_env} not set)"))
+
+    if config.telegram.enabled and os.environ.get(config.telegram.token_env):
+        if config.telegram.owner_id == 0:
+            setup.notes.append(
+                (
+                    "warn",
+                    "telegram.owner_id is 0, so EVERY Telegram message will be "
+                    "ignored. Set your user id in config/alfred.yaml.",
+                )
+            )
+        setup.routes["telegram"] = TelegramTransportAdapter(config.telegram, handler)
+        setup.notes.append(("step", "Telegram polling starting"))
+    elif config.telegram.enabled:
+        setup.notes.append(
+            ("step", f"Telegram off ({config.telegram.token_env} not set)")
+        )
+
+    if config.http.enabled:
+        try:
+            setup.routes["http"] = HttpTransportAdapter(config.http, handler)
+        except AlfredError as exc:
+            setup.notes.append(("bad", f"HTTP API off: {exc}"))
+        else:
+            setup.notes.append(
+                ("step", f"HTTP API on {config.http.host}:{config.http.port}")
+            )
+
+    return setup

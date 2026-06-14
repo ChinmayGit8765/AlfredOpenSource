@@ -174,12 +174,14 @@ class LocalToolAdapter:
         self,
         store: StorePort,
         clock: ClockPort,
-        memory: MemoryService | None = None,
+        memory: MemoryService,
     ) -> None:
         self._store = store
         self._clock = clock
-        # Injected by the composition root; the adapter only calls it.
-        self._memory = memory or MemoryService(store, clock)
+        # Constructed in the composition root and injected; the adapter only
+        # calls it. Required (not a fallback) so no domain service is ever
+        # wired outside the composition root.
+        self._memory = memory
         # Insertion order here is the stable order list_tools() returns.
         self._tools: dict[str, tuple[ToolSpec, type[BaseModel], _Handler]] = {
             "current_time": (

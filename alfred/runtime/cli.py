@@ -20,10 +20,6 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 import alfred
-from alfred.adapters.discord_transport import DiscordTransportAdapter
-from alfred.adapters.http_transport import HttpTransportAdapter
-from alfred.adapters.ollama_model import OllamaModelAdapter
-from alfred.adapters.telegram_transport import TelegramTransportAdapter
 from alfred.config import AlfredConfig, load_config
 from alfred.domain.schemas import InboundMessage, Plan
 from alfred.domain.structured import structured_call
@@ -37,7 +33,9 @@ from alfred.runtime.composition import (
     DryRunModel,
     MultiTransport,
     SwitchableTransport,
+    build_model,
     build_system,
+    build_transports,
     connect_mcp,
 )
 from alfred.runtime.ui import console
@@ -119,7 +117,7 @@ class _StdinReader:
 
 async def _probe_ollama(config: AlfredConfig) -> str:
     """Return a usable model name or raise; bounded so init never hangs."""
-    adapter = OllamaModelAdapter(config.llm)
+    adapter = build_model(config)
     return await asyncio.wait_for(adapter.ensure_model(), timeout=_OLLAMA_PROBE_TIMEOUT)
 
 
@@ -234,52 +232,23 @@ async def _cmd_run(config_path: str | None) -> int:
         ui.step(f"MCP servers configured: {len(config.mcp_servers)}")
 
     # Every transport with credentials runs; the owner reaches the same
-    # brain from whichever channel is in reach.
-    routes: dict[str, "object"] = {}
-    adapters: list[object] = []
-    tasks: list[asyncio.Task[None]] = []
-
-    if os.environ.get(config.discord.token_env):
-        if config.discord.owner_id == 0:
-            console.print(
-                "[warn]WARNING:[/] discord.owner_id is 0 (the default), so "
-                "EVERY Discord message will be ignored. Set your user id in "
-                "config/alfred.yaml."
-            )
-        discord = DiscordTransportAdapter(config.discord, system.core.handle_inbound)
-        routes["discord"] = discord
-        adapters.append(discord)
-        tasks.append(asyncio.create_task(discord.start(), name="discord"))
-        ui.step("Discord gateway starting")
-    else:
-        ui.step(f"Discord off ({config.discord.token_env} not set)")
-
-    if config.telegram.enabled and os.environ.get(config.telegram.token_env):
-        if config.telegram.owner_id == 0:
-            console.print(
-                "[warn]WARNING:[/] telegram.owner_id is 0, so EVERY Telegram "
-                "message will be ignored. Set your user id in config/alfred.yaml."
-            )
-        telegram = TelegramTransportAdapter(
-            config.telegram, system.core.handle_inbound
-        )
-        routes["telegram"] = telegram
-        adapters.append(telegram)
-        tasks.append(asyncio.create_task(telegram.start(), name="telegram"))
-        ui.step("Telegram polling starting")
-    elif config.telegram.enabled:
-        ui.step(f"Telegram off ({config.telegram.token_env} not set)")
-
-    if config.http.enabled:
-        try:
-            http_api = HttpTransportAdapter(config.http, system.core.handle_inbound)
-        except AlfredError as exc:
-            console.print(f"[warn]HTTP API off:[/] {exc}")
+    # brain from whichever channel is in reach. Construction lives in the
+    # composition root; here we only render its notes and run what it built.
+    setup = build_transports(config, system.core.handle_inbound)
+    for level, text in setup.notes:
+        if level == "warn":
+            console.print(f"[warn]WARNING:[/] {text}")
+        elif level == "bad":
+            console.print(f"[warn]{text}[/]")
         else:
-            routes["http"] = http_api
-            adapters.append(http_api)
-            tasks.append(asyncio.create_task(http_api.start(), name="http"))
-            ui.step(f"HTTP API on {config.http.host}:{config.http.port}")
+            ui.step(text)
+
+    routes = setup.routes
+    adapters: list[object] = list(routes.values())
+    tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(adapter.start(), name=prefix)  # type: ignore[attr-defined]
+        for prefix, adapter in routes.items()
+    ]
 
     if not tasks:
         console.print(
@@ -291,7 +260,7 @@ async def _cmd_run(config_path: str | None) -> int:
         return 1
 
     if isinstance(system.transport, SwitchableTransport):
-        system.transport.inner = MultiTransport(routes)  # type: ignore[arg-type]
+        system.transport.inner = MultiTransport(routes)
 
     async def watch_stop() -> None:
         # The owner's kill switch: "alfred stop" in chat sets the flag and
@@ -371,7 +340,7 @@ async def _cmd_demo_roundtrip(fake: bool, config_path: str | None) -> int:
             console.print(f"[bad]Cannot run the round-trip:[/] {exc}")
             console.print(f"[chrome]{_OLLAMA_HINT}[/]")
             return 1
-        model = OllamaModelAdapter(config.llm)
+        model = build_model(config)
 
     with console.status("[chrome]one structured call, validated…[/]", spinner="dots"):
         plan = await structured_call(
