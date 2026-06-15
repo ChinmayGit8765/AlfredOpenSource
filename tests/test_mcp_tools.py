@@ -173,6 +173,22 @@ async def test_invoke_ignores_non_text_content():
     assert result.content == "here you go"
 
 
+async def test_invoke_surfaces_structured_content_when_no_text_blocks():
+    # A spec-conformant tool can return its payload only in structuredContent
+    # with empty content blocks; it must not read as an empty success.
+    session = StubSession(
+        {
+            "lookup": SimpleNamespace(
+                content=[], isError=False, structuredContent={"temp_c": 21}
+            )
+        }
+    )
+    adapter = McpToolAdapter(sessions={"home": session}, specs=[spec("home.lookup")])
+    result = await adapter.invoke("home.lookup", {})
+    assert result.ok is True
+    assert result.content == {"temp_c": 21}
+
+
 async def test_invoke_maps_is_error_to_failed_result():
     adapter, _, _ = make_adapter()
     result = await adapter.invoke("cal.delete_event", {"id": "x"})

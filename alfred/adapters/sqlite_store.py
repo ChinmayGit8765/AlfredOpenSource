@@ -64,6 +64,25 @@ class SqliteStoreAdapter:
         # Adapter layer is the I/O boundary; wall clock is fine here.
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _decode_doc(raw: str, key: str) -> dict[str, Any] | None:
+        """Parse one stored row into a keyed dict, or None if it is unusable.
+
+        A corrupt or non-object row is logged and skipped rather than raised:
+        one bad document must never poison a keyed get or take down every read
+        of the whole collection.
+        """
+        try:
+            doc = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.warning("skipping undecodable document (key=%s)", key)
+            return None
+        if not isinstance(doc, dict):
+            logger.warning("skipping non-object document (key=%s)", key)
+            return None
+        doc["_key"] = key
+        return doc
+
     async def put(self, collection: str, key: str, doc: Mapping[str, Any]) -> None:
         payload = json.dumps(dict(doc), ensure_ascii=False)
         created_at = self._now_iso()
@@ -89,9 +108,7 @@ class SqliteStoreAdapter:
         raw = await self._run(work)
         if raw is None:
             return None
-        doc: dict[str, Any] = json.loads(raw)
-        doc["_key"] = key
-        return doc
+        return self._decode_doc(raw, key)
 
     async def delete(self, collection: str, key: str) -> bool:
         def work() -> int:
@@ -130,10 +147,11 @@ class SqliteStoreAdapter:
         rows = await self._run(work)
         results: list[dict[str, Any]] = []
         for key, raw in rows:
-            doc: dict[str, Any] = json.loads(raw)
+            doc = self._decode_doc(raw, key)
+            if doc is None:
+                continue  # one corrupt row never poisons the whole collection
             if where and any(doc.get(k) != v for k, v in where.items()):
                 continue
-            doc["_key"] = key
             results.append(doc)
             if limit is not None and len(results) >= limit:
                 break

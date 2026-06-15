@@ -12,13 +12,20 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from alfred.errors import ConfigError
+
+# Every config model forbids unknown keys: a typo like
+# `auto_aprove_reversible` must fail loudly at load time, never be silently
+# dropped while the owner believes they changed a safety default.
+_STRICT = ConfigDict(extra="forbid")
 
 
 class ModelConfig(BaseModel):
     """Local model backend settings."""
+
+    model_config = _STRICT
 
     host: str = "http://127.0.0.1:11434"  # localhost by default; sovereignty
     name: str = "qwen3:8b"
@@ -28,6 +35,8 @@ class ModelConfig(BaseModel):
 
 class DiscordConfig(BaseModel):
     """Discord transport settings. The token comes from the environment."""
+
+    model_config = _STRICT
 
     token_env: str = "ALFRED_DISCORD_TOKEN"
     owner_id: int = 0  # Discord user id; only this user is ever obeyed
@@ -44,6 +53,8 @@ class DiscordConfig(BaseModel):
 
 class TelegramConfig(BaseModel):
     """Telegram transport settings. The bot token comes from the environment."""
+
+    model_config = _STRICT
 
     enabled: bool = False
     token_env: str = "ALFRED_TELEGRAM_TOKEN"
@@ -65,6 +76,8 @@ class HttpConfig(BaseModel):
     machine is a deliberate opt-in, and the bearer token is mandatory.
     """
 
+    model_config = _STRICT
+
     enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 8765
@@ -83,6 +96,8 @@ class HttpConfig(BaseModel):
 class HeartbeatConfig(BaseModel):
     """Proactive scheduler settings."""
 
+    model_config = _STRICT
+
     enabled: bool = True
     tick_seconds: int = Field(default=60, ge=5)
     quiet_hours: str = "22:30-07:30"  # "HH:MM-HH:MM" local; no proactive pings
@@ -92,6 +107,8 @@ class HeartbeatConfig(BaseModel):
 class PolicyConfig(BaseModel):
     """Governance knobs. Defaults are the safe direction."""
 
+    model_config = _STRICT
+
     auto_approve_reversible: bool = True  # reversible writes run, but are audited
     dry_run_cross_system: bool = True  # multi-system workflows preview first
     pending_action_ttl_hours: int = 24
@@ -100,7 +117,12 @@ class PolicyConfig(BaseModel):
 class McpServerConfig(BaseModel):
     """One MCP server ALFRED may connect to (phase 6, the action layer)."""
 
-    name: str
+    model_config = _STRICT
+
+    # No dots: tools are namespaced "<name>.<tool>" and routed by splitting on
+    # the first dot, so a dotted server name would misroute every call. The
+    # slug also keeps two servers from sharing a namespace.
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
     command: str
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
@@ -124,6 +146,19 @@ class AlfredConfig(BaseModel):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_mcp_server_names(self) -> AlfredConfig:
+        names = [server.name for server in self.mcp_servers]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            # Two servers sharing a name would collapse into one tool
+            # namespace, clobber each other's session, and route calls to the
+            # wrong server under the wrong tier gate.
+            raise ValueError(
+                f"duplicate MCP server names: {', '.join(duplicates)}; each must be unique"
+            )
+        return self
 
     @property
     def db_path(self) -> Path:

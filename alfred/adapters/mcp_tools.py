@@ -172,6 +172,11 @@ class McpToolAdapter:
                 content=text or None,
                 error=text or f"{name} reported an error",
             )
+        # Some tools return their payload only in structuredContent with no
+        # content blocks; surface it rather than reporting an empty success.
+        structured = getattr(result, "structuredContent", None)
+        if not text and structured is not None:
+            return ToolResult(ok=True, content=structured)
         return ToolResult(ok=True, content=text)
 
     async def close(self) -> None:

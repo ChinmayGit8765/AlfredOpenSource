@@ -50,6 +50,32 @@ async def test_append_keys_strictly_increase(store: SqliteStoreAdapter) -> None:
     assert len(set(keys)) == 5
 
 
+def _insert_raw(store: SqliteStoreAdapter, key: str, doc: str) -> None:
+    store._conn.execute(
+        "INSERT OR REPLACE INTO documents (collection, key, doc, created_at)"
+        " VALUES (?, ?, ?, ?)",
+        (Collections.PLANS, key, doc, "2026-01-01T00:00:00+00:00"),
+    )
+    store._conn.commit()
+
+
+async def test_corrupt_or_non_object_rows_are_skipped_not_fatal(
+    store: SqliteStoreAdapter,
+) -> None:
+    await store.put(Collections.PLANS, "good", {"agent": "training"})
+    _insert_raw(store, "bad", "{not valid json")  # undecodable
+    _insert_raw(store, "scalar", "42")  # valid JSON but not an object
+
+    # A keyed get of a bad row degrades to None, never a raw JSONDecodeError
+    # or TypeError.
+    assert await store.get(Collections.PLANS, "bad") is None
+    assert await store.get(Collections.PLANS, "scalar") is None
+
+    # One bad row does not poison the whole collection: the good row survives.
+    rows = await store.query(Collections.PLANS)
+    assert [r["_key"] for r in rows] == ["good"]
+
+
 async def test_query_orders_by_key_and_newest_first_reverses(
     store: SqliteStoreAdapter,
 ) -> None:
