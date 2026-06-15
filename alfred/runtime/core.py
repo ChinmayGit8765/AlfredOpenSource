@@ -9,6 +9,7 @@ access: confirmation and approval flows only call into governance.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -119,6 +120,14 @@ class AlfredCore:
         self._config = config
         self._agents_dir = Path(agents_dir)
         self._memory = memory or MemoryService(store, clock)
+        # ALFRED serves one owner on one event loop, but every transport plus
+        # the heartbeat run as concurrent tasks. This lock serializes every
+        # inbound and scheduled handler so their read-modify-write cycles on
+        # shared state (pending actions, proposals, builder sessions, the
+        # registry) cannot interleave: e.g. a 'confirm <id>' arriving on two
+        # channels can no longer execute a gated tool twice. Throughput is a
+        # non-goal for a single-owner system; coherence is the point.
+        self._handler_lock = asyncio.Lock()
         self.stop_requested = False
         # Freshest channel the owner spoke on; scheduled output goes there
         # when no channel is configured. In-memory on purpose: a stale "cli"
@@ -129,6 +138,10 @@ class AlfredCore:
     # --- entry points ---------------------------------------------------
 
     async def handle_inbound(self, message: InboundMessage) -> None:
+        async with self._handler_lock:
+            await self._handle_inbound(message)
+
+    async def _handle_inbound(self, message: InboundMessage) -> None:
         try:
             await self._store.append(
                 Collections.MESSAGES, message.model_dump(mode="json")
@@ -158,6 +171,10 @@ class AlfredCore:
                 logger.exception("failed to deliver the error notice")
 
     async def run_scheduled(self, trigger: ScheduledTrigger) -> None:
+        async with self._handler_lock:
+            await self._run_scheduled(trigger)
+
+    async def _run_scheduled(self, trigger: ScheduledTrigger) -> None:
         channel = self._scheduled_channel()
         if trigger.reason == "reflection":
             reflection = await self._reflection.reflect(

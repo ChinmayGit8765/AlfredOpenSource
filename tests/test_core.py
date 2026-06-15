@@ -7,6 +7,7 @@ prove the composition root assembles a working system.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,8 +103,9 @@ def make_world(
     model: FakeModel,
     agents: list[LoadedAgent],
     tools: FakeTools | None = None,
+    store: MemoryStore | None = None,
 ) -> World:
-    store = MemoryStore()
+    store = store or MemoryStore()
     clock = FakeClock()
     tools = tools or FakeTools()
     transport = CapturingTransport()
@@ -783,6 +785,67 @@ async def test_apply_retire_agent_sets_retired_and_persists(tmp_path: Path) -> N
     manifest_text = (agents_dir / "trainer" / "manifest.yaml").read_text(encoding="utf-8")
     assert "lifecycle: retired" in manifest_text
     assert await proposal_applied_events(world, proposal.id)
+
+
+# ---------------------------------------------------------------------------
+# Handler serialization: concurrent inbound cannot race on shared state
+# ---------------------------------------------------------------------------
+
+
+class YieldingStore(MemoryStore):
+    """MemoryStore that yields the event loop on every op.
+
+    The plain fake's async methods never await internally, so concurrent
+    handlers cannot interleave and a race test would pass trivially. Yielding
+    at the start of each op forces the interleaving the production stores
+    exhibit (every await is a yield point), so this exercises the real race.
+    """
+
+    async def get(self, collection, key):
+        await asyncio.sleep(0)
+        return await super().get(collection, key)
+
+    async def put(self, collection, key, doc):
+        await asyncio.sleep(0)
+        return await super().put(collection, key, doc)
+
+    async def append(self, collection, doc):
+        await asyncio.sleep(0)
+        return await super().append(collection, doc)
+
+    async def query(self, collection, **kwargs):
+        await asyncio.sleep(0)
+        return await super().query(collection, **kwargs)
+
+
+async def test_concurrent_confirms_execute_a_gated_tool_once(tmp_path: Path) -> None:
+    # Two 'confirm <id>' messages arriving together (e.g. on two transports)
+    # must not both execute the gated tool. The core handler lock serializes
+    # them: one executes, the other finds the action already resolved. The
+    # yielding store forces the interleaving that, without the lock, would
+    # double-execute.
+    tools = FakeTools()
+    tools.add("delete_thing", tier=CapabilityTier.DESTRUCTIVE)
+    model = FakeModel(
+        [agent_reply("deleting", tool_calls=[{"tool": "delete_thing", "args": {}}])]
+    )
+    world = make_world(
+        tmp_path, model, [make_agent("training", ["train"], allowed_tools=["delete_thing"])],
+        tools=tools,
+        store=YieldingStore(),
+    )
+
+    await world.core.handle_inbound(inbound("train and delete"))
+    actions = await world.pending.list_pending()
+    assert len(actions) == 1  # the destructive call was gated
+    action_id = actions[0].id
+
+    await asyncio.gather(
+        world.core.handle_inbound(inbound(f"confirm {action_id}")),
+        world.core.handle_inbound(inbound(f"confirm {action_id}")),
+    )
+
+    assert tools.invocations.count(("delete_thing", {})) == 1  # executed exactly once
 
 
 async def test_build_system_fake_smoke(tmp_path: Path) -> None:
