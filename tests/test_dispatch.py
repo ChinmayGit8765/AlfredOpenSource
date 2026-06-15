@@ -15,7 +15,9 @@ from alfred.testing import FakeClock, FakeTools, MemoryStore
 READ_TOOL = "current_time"
 WRITE_TOOL = "log_note"
 DESTRUCTIVE_TOOL = "delete_file"
-ALL_TOOLS = [READ_TOOL, WRITE_TOOL, DESTRUCTIVE_TOOL]
+MCP_WRITE_TOOL = "calendar.create_event"  # cross-system (an MCP server)
+MCP_READ_TOOL = "calendar.list_events"  # cross-system but read-only
+ALL_TOOLS = [READ_TOOL, WRITE_TOOL, DESTRUCTIVE_TOOL, MCP_WRITE_TOOL, MCP_READ_TOOL]
 
 
 def make_agent(name: str = "trainer", allowed: list[str] | None = None) -> LoadedAgent:
@@ -28,16 +30,23 @@ def make_agent(name: str = "trainer", allowed: list[str] | None = None) -> Loade
 
 
 def make_dispatcher(
-    *, auto_approve_reversible: bool = True
+    *, auto_approve_reversible: bool = True, dry_run_cross_system: bool = True
 ) -> tuple[ToolDispatcher, FakeTools, MemoryStore, FakeClock, PendingActions]:
     tools = FakeTools()
     tools.add(READ_TOOL, tier=CapabilityTier.READ_ONLY)
     tools.add(WRITE_TOOL, tier=CapabilityTier.REVERSIBLE_WRITE)
     tools.add(DESTRUCTIVE_TOOL, tier=CapabilityTier.DESTRUCTIVE)
+    tools.add(
+        MCP_WRITE_TOOL, tier=CapabilityTier.REVERSIBLE_WRITE, source="mcp:calendar"
+    )
+    tools.add(MCP_READ_TOOL, tier=CapabilityTier.READ_ONLY, source="mcp:calendar")
     store = MemoryStore()
     clock = FakeClock()
     pending = PendingActions(store, clock)
-    policy = Policy(auto_approve_reversible=auto_approve_reversible)
+    policy = Policy(
+        auto_approve_reversible=auto_approve_reversible,
+        dry_run_cross_system=dry_run_cross_system,
+    )
     dispatcher = ToolDispatcher(tools, store, clock, policy, pending)
     return dispatcher, tools, store, clock, pending
 
@@ -161,6 +170,71 @@ async def test_read_only_from_external_executes():
     assert outcome.pending is None
     assert outcome.result is not None and outcome.result.ok is True
     assert tools.invocations == [(READ_TOOL, {})]
+
+
+# ---------------------------------------------------------------------------
+# Dry run before cross-system action
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_system_write_is_previewed_under_dry_run():
+    # A reversible write to an MCP server would auto-approve on tier alone,
+    # but the dry-run gate previews cross-system writes until trusted.
+    dispatcher, tools, store, _, _ = make_dispatcher(
+        auto_approve_reversible=True, dry_run_cross_system=True
+    )
+    agent = make_agent()
+
+    outcome = await dispatcher.dispatch(agent, ToolCall(tool=MCP_WRITE_TOOL), "owner")
+
+    assert outcome.result is None
+    assert outcome.pending is not None
+    assert "dry run" in outcome.pending.reason
+    assert tools.invocations == []  # previewed, not executed
+    gated = [r for r in await store.query(Collections.AUDIT) if r["event"] == "tool_gated"]
+    assert len(gated) == 1
+
+
+async def test_cross_system_write_executes_once_trusted():
+    # With the dry run turned off, a cross-system reversible write auto-runs
+    # like any other reversible write the owner has accepted.
+    dispatcher, tools, _, _, _ = make_dispatcher(
+        auto_approve_reversible=True, dry_run_cross_system=False
+    )
+    agent = make_agent()
+
+    outcome = await dispatcher.dispatch(agent, ToolCall(tool=MCP_WRITE_TOOL), "owner")
+
+    assert outcome.pending is None
+    assert outcome.result is not None and outcome.result.ok is True
+    assert tools.invocations == [(MCP_WRITE_TOOL, {})]
+
+
+async def test_cross_system_read_is_not_previewed():
+    # The dry run is for actions (writes), not reads: a cross-system read-only
+    # call runs without a preview.
+    dispatcher, tools, _, _, _ = make_dispatcher(dry_run_cross_system=True)
+    agent = make_agent()
+
+    outcome = await dispatcher.dispatch(agent, ToolCall(tool=MCP_READ_TOOL), "owner")
+
+    assert outcome.pending is None
+    assert outcome.result is not None and outcome.result.ok is True
+    assert tools.invocations == [(MCP_READ_TOOL, {})]
+
+
+async def test_local_write_is_unaffected_by_dry_run():
+    # The dry run only previews external systems; local reversible writes
+    # still auto-approve.
+    dispatcher, tools, _, _, _ = make_dispatcher(
+        auto_approve_reversible=True, dry_run_cross_system=True
+    )
+    agent = make_agent()
+
+    outcome = await dispatcher.dispatch(agent, ToolCall(tool=WRITE_TOOL), "owner")
+
+    assert outcome.pending is None
+    assert tools.invocations == [(WRITE_TOOL, {})]
 
 
 # ---------------------------------------------------------------------------

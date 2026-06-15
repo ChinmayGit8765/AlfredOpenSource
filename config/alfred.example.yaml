@@ -115,10 +115,12 @@ policy:
   # always confirms regardless of this setting. Default: true
   auto_approve_reversible: true
 
-  # Reserved for the phase-6 action layer: when cross-system workflows
-  # arrive, true will make them preview their actions before executing.
-  # Nothing reads this yet; it exists so the safe default is already set
-  # when that capability lands. Default: true
+  # When true, any write that reaches an external system (a tool from an
+  # MCP server, not a built-in local tool) is previewed for your
+  # confirmation before it runs, even if its tier would auto-approve. This
+  # is the "dry run until trusted" gate: set it false once you trust a
+  # connected workflow to act without a preview. Read-only cross-system
+  # calls are never gated by this. Default: true
   dry_run_cross_system: true
 
   # Hours before an unconfirmed pending action expires. Default: 24

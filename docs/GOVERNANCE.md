@@ -30,6 +30,15 @@ and on where the instruction came from. The truth table, binding:
 default). Set it false in `config/alfred.yaml` and reversible writes
 confirm too. There is no setting that makes destructive actions automatic.
 
+One more gate sits on top of the tier table: `policy.dry_run_cross_system`
+(on by default). While it holds, any write that reaches an external system
+(a tool whose source is an MCP server, not a built-in local tool) is
+previewed for your confirmation before it runs, even when its tier would
+auto-approve. Read-only cross-system calls are unaffected. This is the "dry
+run until trusted" stance: when you trust a connected workflow to act
+without a preview, set it false. Until any MCP server is configured, no
+tool is cross-system, so the gate is inert.
+
 ## Provenance and prompt injection
 
 Every inbound instruction carries a provenance: `owner` (you, through a

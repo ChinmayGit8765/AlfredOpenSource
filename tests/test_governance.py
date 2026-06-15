@@ -52,6 +52,31 @@ def test_policy_defaults_to_auto_approving_reversible():
 
 
 # ---------------------------------------------------------------------------
+# Dry run before cross-system action
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_previews_cross_system_writes_owner_would_otherwise_auto_run():
+    policy = Policy(auto_approve_reversible=True, dry_run_cross_system=True)
+    # Local reversible write auto-runs; the same tier on a cross-system tool
+    # is previewed instead.
+    assert policy.requires_confirmation(REVERSIBLE, "owner") is False
+    assert policy.requires_confirmation(REVERSIBLE, "owner", cross_system=True) is True
+
+
+def test_dry_run_does_not_preview_cross_system_reads():
+    policy = Policy(dry_run_cross_system=True)
+    assert policy.requires_confirmation(READ_ONLY, "owner", cross_system=True) is False
+
+
+def test_dry_run_off_lets_trusted_cross_system_writes_run():
+    policy = Policy(auto_approve_reversible=True, dry_run_cross_system=False)
+    assert policy.requires_confirmation(REVERSIBLE, "owner", cross_system=True) is False
+    # Destructive is still always gated regardless of the dry-run setting.
+    assert policy.requires_confirmation(DESTRUCTIVE, "owner", cross_system=True) is True
+
+
+# ---------------------------------------------------------------------------
 # audit()
 # ---------------------------------------------------------------------------
 

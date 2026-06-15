@@ -318,7 +318,10 @@ def build_system(
 
     registry = load_agents(config.agents_dir)
     user_model = UserModelService(store, clock)
-    policy = Policy(auto_approve_reversible=config.policy.auto_approve_reversible)
+    policy = Policy(
+        auto_approve_reversible=config.policy.auto_approve_reversible,
+        dry_run_cross_system=config.policy.dry_run_cross_system,
+    )
     pending = PendingActions(
         store, clock, ttl_hours=config.policy.pending_action_ttl_hours
     )

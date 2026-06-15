@@ -78,9 +78,18 @@ class ToolDispatcher:
             )
             raise ToolNotFoundError(f"unknown tool: {call.tool}")
 
-        if self._policy.requires_confirmation(spec.tier, provenance):
+        # A non-local source is an external system (an MCP server); the
+        # policy previews cross-system writes until the owner trusts them.
+        cross_system = spec.source != "local"
+        if self._policy.requires_confirmation(
+            spec.tier, provenance, cross_system=cross_system
+        ):
+            reason = call.reason
+            if cross_system and self._policy.dry_run_cross_system:
+                preview = "cross-system action: previewed before it runs (dry run)"
+                reason = f"{reason}; {preview}" if reason else preview
             action = await self._pending.create(
-                agent_name, call, spec.tier, provenance, reason=call.reason
+                agent_name, call, spec.tier, provenance, reason=reason
             )
             await audit(
                 self._store,

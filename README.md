@@ -9,7 +9,7 @@
 [![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
-[![offline tests](https://img.shields.io/badge/tests-424%20offline-success)](tests/)
+[![offline tests](https://img.shields.io/badge/tests-431%20offline-success)](tests/)
 
 <img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
 
@@ -252,9 +252,13 @@ false to gate everything above read-only.
 
 Gated actions surface with an id; rule on them in chat with `confirm <id>`
 or `deny <id>`. Unconfirmed actions expire after 24 hours. Allowlists are
-deny-by-default and only the owner widens them. Every dispatch decision is
-audited. Full model, including the prompt-injection stance and the kill
-switch reality, in [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
+deny-by-default and only the owner widens them. And until you trust a
+workflow, any write that reaches an external system (a tool from an MCP
+server, not a built-in one) is previewed for your confirmation before it
+runs, even if its tier would auto-approve: the `policy.dry_run_cross_system`
+gate, on by default. Every dispatch decision is audited. Full model,
+including the prompt-injection stance and the kill switch reality, in
+[docs/GOVERNANCE.md](docs/GOVERNANCE.md).
 
 ## Configuration
 
@@ -300,7 +304,8 @@ The horizon, in order (see [docs/SPEC.md](docs/SPEC.md)):
 - **Calendar connector first**: the first real MCP server, with read-only
   tools auto-approved and event writes gated by tier.
 - **Cross-system workflows**: one intent composed across several connected
-  systems, dry-run previews until a workflow has earned trust.
+  systems. The dry-run preview gate for cross-system writes is already in
+  place; composing a single intent across systems is the work that remains.
 - **Expanding MCP surface**: every server the owner connects becomes a
   capability behind `ToolPort`; no bespoke integrations, ever.
 - **Autonomy dial**: confirmation requirements that relax per workflow as

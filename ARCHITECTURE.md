@@ -135,11 +135,18 @@ def route(message: InboundMessage, registry: AgentRegistry) -> list[LoadedAgent]
 
 ```python
 class Policy:
-    def __init__(self, *, auto_approve_reversible: bool = True) -> None
-    def requires_confirmation(self, tier: CapabilityTier, provenance: Provenance) -> bool
+    def __init__(self, *, auto_approve_reversible: bool = True,
+                 dry_run_cross_system: bool = True) -> None
+    def requires_confirmation(self, tier: CapabilityTier, provenance: Provenance,
+                              *, cross_system: bool = False) -> bool
         # DESTRUCTIVE: always True. REVERSIBLE_WRITE: True when
         # provenance == "external" or auto_approve_reversible is False.
         # READ_ONLY: always False.
+        # Dry run: a non-READ_ONLY call with cross_system=True (a tool whose
+        # source is an MCP server, not "local") is True while
+        # dry_run_cross_system holds, so cross-system writes are previewed
+        # until trusted. The dispatcher passes cross_system = (spec.source
+        # != "local").
         # Net effect: external content never auto-executes anything above
         # READ_ONLY, and destructive actions are never auto-executed at all.
 

@@ -40,13 +40,32 @@ async def audit(store: StorePort, clock: ClockPort, event: str, **data: Any) -> 
 class Policy:
     """Decides which (tier, provenance) pairs require owner confirmation."""
 
-    def __init__(self, *, auto_approve_reversible: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        auto_approve_reversible: bool = True,
+        dry_run_cross_system: bool = True,
+    ) -> None:
         self.auto_approve_reversible = auto_approve_reversible
+        self.dry_run_cross_system = dry_run_cross_system
 
-    def requires_confirmation(self, tier: CapabilityTier, provenance: Provenance) -> bool:
+    def requires_confirmation(
+        self,
+        tier: CapabilityTier,
+        provenance: Provenance,
+        *,
+        cross_system: bool = False,
+    ) -> bool:
         # External content never auto-executes anything above READ_ONLY,
         # and destructive actions are never auto-executed at all.
         if tier == CapabilityTier.DESTRUCTIVE:
+            return True
+        # Dry run before cross-system action: until the owner trusts the
+        # workflow, any write reaching an external system (an MCP server, not
+        # a local tool) is previewed for confirmation rather than executed,
+        # even when its tier would otherwise auto-approve. Read-only
+        # cross-system calls are not actions, so they are never previewed.
+        if cross_system and self.dry_run_cross_system and tier != CapabilityTier.READ_ONLY:
             return True
         if tier == CapabilityTier.REVERSIBLE_WRITE:
             return provenance == "external" or not self.auto_approve_reversible

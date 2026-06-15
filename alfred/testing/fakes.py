@@ -147,8 +147,11 @@ class FakeTools:
         tier: CapabilityTier = CapabilityTier.READ_ONLY,
         handler: Callable[..., Any] | None = None,
         description: str = "",
+        source: str = "local",
     ) -> None:
-        spec = ToolSpec(name=name, description=description or name, tier=tier)
+        spec = ToolSpec(
+            name=name, description=description or name, tier=tier, source=source
+        )
         self._tools[name] = (spec, handler or (lambda **kwargs: {"ok": True}))
 
     async def list_tools(self) -> list[ToolSpec]:
