@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 build/
 dist/
+.coverage
+htmlcov/
 
 # ALFRED local state (never commit the owner's data)
 data/
