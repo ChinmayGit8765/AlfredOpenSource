@@ -1,4 +1,4 @@
-# ALFRED — Build Specification
+# ALFRED: Build Specification
 
 This is the binding product and engineering specification for ALFRED. Code
 review audits the implementation against this document and ARCHITECTURE.md.
@@ -53,9 +53,10 @@ Clean, layered, ports-and-adapters (see ARCHITECTURE.md):
 
 - Domain layer (pure logic, no I/O): agents, the Conductor, the Adaptive
   Agent Builder, planning, validation, the user model.
-- Ports: `ModelPort`, `TransportPort`, `StorePort`, `ToolPort`.
-- Adapters: `OllamaAdapter`, `DiscordAdapter`, `SqliteAdapter`, MCP-based
-  tool adapters.
+- Ports: `ModelPort`, `TransportPort`, `StorePort`, `ToolPort`, `ClockPort`
+  (even time is injected).
+- Adapters: `OllamaAdapter`, Discord/Telegram/HTTP transports,
+  `SqliteAdapter`, local tools, MCP-based tool adapters.
 - Dependency injection at a single composition root; the domain never
   imports an adapter.
 
@@ -151,8 +152,9 @@ data.
    output, from a terminal.
 2. Core + first agent: manifest schema, discovery, orchestration core,
    Training agent, CLI.
-3. Transport: discord.py adapter. v1 ship point: a Training agent folder,
-   messaged on Discord, returns a validated weekly plan, which is stored.
+3. Transport: discord.py adapter (Telegram and a local HTTP API followed on
+   the same TransportPort). v1 ship point: a Training agent folder, messaged
+   on Discord, returns a validated weekly plan, which is stored.
 4. Conductor + Study and Build agents + concurrent-plan reconciliation.
 5. Adaptation, proactivity, accountability: user model, feedback loop,
    heartbeat, reflection, human-in-the-loop proposals.
@@ -163,7 +165,7 @@ data.
 
 - Python 3.12+, full type hints, pydantic v2 throughout.
 - uv for dependency management; minimal justified dependencies
-  (`ollama`, `pydantic`, `pyyaml`, `discord.py`; `mcp` optional).
+  (`ollama`, `pydantic`, `pyyaml`, `rich`, `discord.py`; `mcp` optional).
 - pytest for the domain layer, validation/retry, adaptation, tier gating.
 - Structured logging; no print debugging in committed code.
 - Small single-responsibility modules; comments explain why, not what.

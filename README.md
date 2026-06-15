@@ -9,7 +9,7 @@
 [![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
-[![offline tests](https://img.shields.io/badge/tests-340%20offline-success)](tests/)
+[![offline tests](https://img.shields.io/badge/tests-413%20offline-success)](tests/)
 
 <img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
 
@@ -47,8 +47,9 @@ Build-order phases 1 through 5 are implemented and tested:
    the model (`alfred demo-roundtrip`).
 2. **Core + agents**: manifest schema, folder discovery, the orchestration
    core, three hand-written agents (training, study, build), and the CLI.
-3. **Transport**: a Discord adapter that obeys only the configured owner
-   and silently ignores everyone else.
+3. **Transport**: Discord, Telegram, and a local HTTP API, each obeying
+   only the configured owner and silently ignoring everyone else (see the
+   transport table below).
 4. **Conductor**: concurrent-plan reconciliation with pure conflict
    detection and a deterministic fallback, so a reconciled week is never
    over capacity regardless of what the model says.
@@ -232,10 +233,11 @@ nagging. Streak shame and fake urgency are banned by design.
 ### Self-improvement via proposals
 
 The periodic reflection reviews the record and emits proposals: prompt
-changes, lifecycle transitions, new or retired agents. Nothing applies
-itself. You review with `proposals` and rule with `approve <id>` or
-`reject <id>`; anything touching safety settings demands an extra
-`confirm-safety` token.
+changes, lifecycle transitions, new or retired agents. A lapsing agent is
+diagnosed (not nagged) and its fix is surfaced the same way. Run a review
+on demand with `reflect`. Nothing applies itself: you review with
+`proposals` and rule with `approve <id>` or `reject <id>`; anything
+touching safety settings demands an extra `confirm-safety` token.
 
 ## Governance
 

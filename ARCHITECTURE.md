@@ -28,6 +28,7 @@ layers clean.
                                     | implemented by
         +---------------------------+---------------------------+
         |  adapters/: ollama_model  discord_transport           |
+        |             telegram_transport  http_transport        |
         |             sqlite_store  local_tools  mcp_tools      |
         +-------------------------------------------------------+
 ```
@@ -71,7 +72,7 @@ extra optional keyword arguments, but must not rename, remove, or change the
 meaning of anything listed. Other modules are written in parallel against
 these exact surfaces.
 
-### domain/structured.py — validated LLM calls
+### domain/structured.py: validated LLM calls
 
 ```python
 T = TypeVar("T", bound=BaseModel)
@@ -97,7 +98,7 @@ async def structured_call(
     # correct itself. Raises StructuredCallError after max_attempts.
 ```
 
-### domain/registry.py — agents in memory (pure; loading is runtime's job)
+### domain/registry.py: agents in memory (pure; loading is runtime's job)
 
 ```python
 class LoadedAgent(BaseModel):
@@ -119,7 +120,7 @@ def parse_manifest(raw: dict) -> AgentManifest
     # readable message on failure.
 ```
 
-### domain/routing.py — which agents handle a message
+### domain/routing.py: which agents handle a message
 
 ```python
 def route(message: InboundMessage, registry: AgentRegistry) -> list[LoadedAgent]
@@ -130,7 +131,7 @@ def route(message: InboundMessage, registry: AgentRegistry) -> list[LoadedAgent]
     # no specific agent claimed it (core falls back to general handling).
 ```
 
-### domain/governance.py — tiers, policy, pending actions, proposals
+### domain/governance.py: tiers, policy, pending actions, proposals
 
 ```python
 class Policy:
@@ -165,7 +166,7 @@ async def audit(store: StorePort, clock: ClockPort, event: str, **data: Any) -> 
     # Appends {"event": event, "at": iso-now, **data} to Collections.AUDIT.
 ```
 
-### domain/dispatch.py — the gated tool dispatcher
+### domain/dispatch.py: the gated tool dispatcher
 
 ```python
 class DispatchOutcome(BaseModel):
@@ -190,7 +191,7 @@ class ToolDispatcher:
         # ToolNotAllowedError), invokes, audits.
 ```
 
-### domain/user_model.py — the evolving model of the owner
+### domain/user_model.py: the evolving model of the owner
 
 ```python
 class UserModelService:
@@ -211,7 +212,7 @@ class UserModelService:
         # inclusion in agent prompts
 ```
 
-### domain/feedback.py — closing the loop
+### domain/feedback.py: closing the loop
 
 ```python
 def parse_outcome_report(text: str) -> OutcomeStatus | None
@@ -230,7 +231,7 @@ def plan_adjustment_hint(stats: AdherenceStats) -> str
     # shrink it" for lapsing agents
 ```
 
-### domain/conductor.py — concurrent plans that do not collide
+### domain/conductor.py: concurrent plans that do not collide
 
 ```python
 def detect_conflicts(plans: list[Plan], weekly_capacity: int) -> list[Conflict]
@@ -249,7 +250,7 @@ class Conductor:
         # first) so reconcile() never returns an over-capacity schedule.
 ```
 
-### domain/lifecycle.py — agent lifecycle rules
+### domain/lifecycle.py: agent lifecycle rules
 
 ```python
 def check_in_interval(state: Lifecycle) -> timedelta | None
@@ -257,10 +258,17 @@ def check_in_interval(state: Lifecycle) -> timedelta | None
     # MAINTENANCE: 7 days; PROPOSED/PAUSED/RETIRED: None
 
 def next_lifecycle(state: Lifecycle, stats: AdherenceStats) -> Lifecycle
-    # deterministic transitions, e.g. FORMING + rate>=0.8 over >=14 logged
-    # outcomes -> ESTABLISHED; any active state + consecutive_misses>=2 ->
-    # LAPSING; LAPSING + consecutive_dones>=3 -> FORMING (rebuild gently).
-    # Conservative: when unsure, stay put.
+    # deterministic transitions, e.g. FORMING + rate>=0.8 over >=14 engaged
+    # outcomes (skips excluded) -> ESTABLISHED; any active state +
+    # consecutive_misses>=2 -> LAPSING; LAPSING + consecutive_dones>=3 ->
+    # FORMING (rebuild gently). Conservative: when unsure, stay put.
+
+def lapse_proposal(agent_name: str, current: Lifecycle,
+                   diagnosis: LapseDiagnosis) -> Proposal | None
+    # maps a diagnosis to one human-in-the-loop proposal: pause/reshape ->
+    # LIFECYCLE_CHANGE, retire -> RETIRE_AGENT, shrink -> MANIFEST_CHANGE,
+    # reanchor -> PROMPT_CHANGE, hold -> None. Reshape is the producer that
+    # makes RESHAPED reachable; retire the producer for RETIRE_AGENT.
 
 class LapseDoctor:
     def __init__(self, model: ModelPort, clock: ClockPort) -> None
@@ -269,10 +277,13 @@ class LapseDoctor:
                        owner_comment: str = "") -> LapseDiagnosis
         # structured_call producing LapseDiagnosis; tone rules: a lapse is
         # data, never moral failure; no streak shame; retiring is a valid
-        # outcome
+        # outcome. Wired in the composition root and invoked by
+        # AlfredCore.run_scheduled when a LAPSING agent's check-in fires:
+        # diagnose, surface, and file one proposal (guarded against piling
+        # up duplicates while one is pending).
 ```
 
-### domain/builder.py — the Adaptive Agent Builder
+### domain/builder.py: the Adaptive Agent Builder
 
 ```python
 class WipVerdict(BaseModel):
@@ -312,7 +323,7 @@ smallest viable size; anchor to existing cues; respect the WIP limit; never
 use streak shame, fake urgency, or engagement bait; retiring or shrinking a
 goal is always an acceptable recommendation.
 
-### domain/reflection.py — periodic strategy review
+### domain/reflection.py: periodic strategy review
 
 ```python
 class ReflectionEngine:
@@ -328,7 +339,7 @@ class ReflectionEngine:
         # silent edits.
 ```
 
-### domain/memory.py — explicit recallable facts
+### domain/memory.py: explicit recallable facts
 
 ```python
 def tokenize(text: str) -> set[str]      # lowercase content tokens, stopword-light
@@ -359,7 +370,7 @@ prefix; bare numeric channels route to Discord for back-compat. Every
 transport ignores all senders except its configured owner id, and
 serializes calls into the core behind a lock.
 
-### domain/executor.py — running one agent
+### domain/executor.py: running one agent
 
 ```python
 class AgentExecutor:
@@ -412,12 +423,13 @@ class DiscordTransportAdapter:                  # implements TransportPort
 # adapters/local_tools.py
 class LocalToolAdapter:                         # implements ToolPort
     def __init__(self, store: StorePort, clock: ClockPort,
-                 memory: MemoryService | None = None) -> None
+                 memory: MemoryService) -> None
     # built-ins (all READ_ONLY unless noted): current_time, list_plans,
     # list_recent_outcomes, list_agents_state, recall_memories,
     # log_note (REVERSIBLE_WRITE), remember_fact (REVERSIBLE_WRITE).
-    # The MemoryService is injected by the composition root; receiving a
-    # domain service via constructor is the sanctioned exception to the
+    # The MemoryService is constructed in the composition root and injected
+    # (required, never built here); receiving a domain service via
+    # constructor is the sanctioned exception to the
     # adapters-do-not-import-domain-services rule.
 
 # adapters/telegram_transport.py
@@ -483,9 +495,15 @@ class Heartbeat:
     # Collections.HEARTBEAT so restarts do not double-fire
 
 # runtime/composition.py
-def build_system(config: AlfredConfig, *, fake: bool = False) -> ComposedSystem
+def build_system(config: AlfredConfig, *, fake: bool = False,
+                 transport: TransportPort | None = None) -> ComposedSystem
     # the single composition root; ComposedSystem dataclass exposes core,
-    # heartbeat, transport, store, registry for the CLI to drive
+    # heartbeat, transport, store, registry, lapse_doctor for the CLI to drive.
+    # transport defaults to a SwitchableTransport slot the CLI fills later.
+def build_model(config: AlfredConfig) -> OllamaModelAdapter   # for CLI probe/demo
+def build_transports(config, handler) -> TransportSetup       # routes + CLI notes
+    # All adapter construction lives here; the CLI only renders notes and runs
+    # the transports these factories return.
 ```
 
 ## Governance model (binding)

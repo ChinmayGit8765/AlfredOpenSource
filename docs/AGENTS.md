@@ -62,8 +62,8 @@ capacity_cost: 1
 ```
 
 Built-in local tools you can grant: `current_time`, `list_plans`,
-`list_recent_outcomes`, `list_agents_state` (all read-only) and `log_note`
-(reversible write).
+`list_recent_outcomes`, `list_agents_state`, `recall_memories` (all
+read-only) and `log_note`, `remember_fact` (reversible write).
 
 ## agent.md: the behaviour prompt
 

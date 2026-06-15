@@ -119,6 +119,11 @@ database as an append-only record: `{"event": ..., "at": <iso timestamp>,
 | `tool_gated` | a call was held for confirmation | agent, tool, tier, provenance, action_id |
 | `tool_executed` | a call actually ran (auto or confirmed) | agent, tool, tier, provenance, ok, action_id |
 | `agent_run` | one agent run completed | agent, provenance, rounds, tool_calls, plan_id |
+| `pending_action_resolved` | a gated call was confirmed or denied | action_id, agent, tool, tier, approved |
+| `pending_action_expired` | a gated call lapsed past its TTL unruled | action_id, agent, tool, tier |
+| `proposal_created` | a self-change proposal was filed pending | proposal_id, kind, agent, touches_safety |
+| `proposal_resolved` | a proposal was approved or rejected | proposal_id, kind, agent, touches_safety, approved |
+| `proposal_applied` | an approved proposal was applied to memory/disk | proposal_id, kind, agent, touches_safety |
 
 Who, what, tier, provenance, verdict: enough to reconstruct any decision
 after the fact. Audit records are never deleted by ALFRED.
@@ -147,10 +152,9 @@ Honest inventory of the off switches, strongest first:
   machine. Ctrl-C ends it; nothing keeps running anywhere else. This is
   the real kill switch.
 - **`alfred stop` in chat** asks for a clean shutdown. In the terminal
-  REPL (`alfred chat`) it ends the session immediately. Known gap: in
-  `alfred run` (Discord mode) the stop flag is set and acknowledged, but
-  the service loop does not yet watch it, so use Ctrl-C in the terminal to
-  actually stop the service.
+  REPL (`alfred chat`) it ends the session immediately; in `alfred run` a
+  watcher task watches the stop flag and brings the whole service down, so
+  the kill switch works from any transport, not only Ctrl-C.
 - **Lifecycle pause** stops one agent without touching the rest: set
   `lifecycle: paused` in its manifest and restart. Paused agents never
   route, never schedule, never check in.
@@ -159,9 +163,8 @@ Honest inventory of the off switches, strongest first:
 - **`heartbeat.quiet_hours`** silences proactive behaviour on a daily
   schedule without stopping anything.
 
-The config field `heartbeat.enabled` exists but is not yet honoured by the
-runtime; to disable proactivity today, do not run `alfred run` (use
-`alfred chat`), or stop the process.
+Set `heartbeat.enabled: false` to disable all proactive behaviour while
+still running `alfred run`; ALFRED then only reacts, never initiates.
 
 ## Local sovereignty defaults
 
