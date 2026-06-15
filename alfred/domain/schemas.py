@@ -35,6 +35,8 @@ class Collections:
     PLANS = "plans"
     SCHEDULES = "schedules"  # Conductor-reconciled weekly schedules
     MEMORIES = "memories"  # explicit recallable facts about the owner's life
+    ROADMAPS = "roadmaps"  # a goal decomposed into a sequence of small wins
+    WINS = "wins"  # the running log of small wins, for momentum
     OUTCOMES = "outcomes"
     OBSERVATIONS = "observations"
     PROFILE = "profile"  # keyed; current profile lives at key "current"
@@ -427,6 +429,63 @@ class LapseDiagnosis(BaseModel):
     detail: str = ""
     new_size: str | None = None
     new_anchor: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Roadmap to goal: many small wins
+# ---------------------------------------------------------------------------
+
+
+class Milestone(BaseModel):
+    """One small win on the way to a goal: almost too small to fail.
+
+    A milestone is a single concrete step the owner can finish and feel,
+    not a phase of work. The done_signal makes "done" observable so a win
+    is unambiguous; the anchor stacks it onto an existing cue.
+    """
+
+    id: str = Field(default_factory=new_id)
+    title: str
+    why: str = ""  # how this step ladders up to the goal
+    done_signal: str = ""  # the observable sign it is complete
+    anchor: str | None = None  # an existing cue this step stacks onto
+    status: Literal["pending", "active", "won", "skipped"] = "pending"
+
+
+class Roadmap(BaseModel):
+    """A goal decomposed into a sequence of small wins.
+
+    The roadmap is the owner's path, not a contract: it can be reshaped as
+    they learn. Exactly one milestone is active at a time so the owner faces
+    one small next step, never the whole mountain.
+    """
+
+    id: str = Field(default_factory=new_id)
+    goal: str = ""  # the stated destination
+    real_lever: str = ""  # the true lever behind the goal, once elicited
+    milestones: list[Milestone] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+    @property
+    def next_win(self) -> Milestone | None:
+        """The single next small win: the first milestone not yet won/skipped."""
+        return next(
+            (m for m in self.milestones if m.status in ("pending", "active")), None
+        )
+
+    @property
+    def won_count(self) -> int:
+        return sum(1 for m in self.milestones if m.status == "won")
+
+
+class Win(BaseModel):
+    """One small win, recorded so progress stays visible. Momentum, not streaks."""
+
+    id: str = Field(default_factory=new_id)
+    text: str
+    source: str = "owner"  # "owner", an agent name, or "milestone"
+    goal: str | None = None  # which goal it ladders toward, if any
+    at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------

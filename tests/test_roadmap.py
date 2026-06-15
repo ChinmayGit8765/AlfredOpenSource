@@ -1,0 +1,101 @@
+"""Tests for roadmap-to-goal: small-win decomposition and the wins ledger."""
+
+from __future__ import annotations
+
+import json
+
+from alfred.domain.roadmap import RoadmapPlanner, WinsLedger
+from alfred.domain.schemas import Collections, Milestone, Roadmap
+from alfred.testing import FakeClock, FakeModel, MemoryStore
+
+ROADMAP_JSON = json.dumps(
+    {
+        "goal": "ignored; the planner enforces the real goal",
+        "milestones": [
+            {
+                "title": "Lay out clothes tonight",
+                "why": "removes the morning friction that stalls a run",
+                "done_signal": "clothes on the chair",
+                "anchor": "after brushing teeth",
+            },
+            {
+                "title": "Walk five minutes after coffee",
+                "why": "builds the leaving-the-house habit",
+                "done_signal": "back home, shoes off",
+                "anchor": "after morning coffee",
+            },
+            {
+                "title": "Walk fifteen minutes",
+                "why": "extends the habit once leaving is automatic",
+                "done_signal": "fifteen minutes on the clock",
+                "anchor": "after morning coffee",
+            },
+        ],
+    }
+)
+
+
+async def test_planner_builds_a_roadmap_of_small_wins() -> None:
+    model = FakeModel([ROADMAP_JSON])
+    planner = RoadmapPlanner(model, FakeClock())
+
+    roadmap = await planner.plan("get fit", real_lever="move every morning")
+
+    assert roadmap.goal == "get fit"  # enforced, not the model's stray value
+    assert roadmap.real_lever == "move every morning"
+    assert roadmap.created_at is not None
+    # Exactly one active milestone (the first); the owner faces one next step.
+    assert [m.status for m in roadmap.milestones] == ["active", "pending", "pending"]
+    assert roadmap.next_win is not None
+    assert roadmap.next_win.title == "Lay out clothes tonight"
+    assert roadmap.won_count == 0
+
+    # The planner is briefed with the small-wins stance.
+    system = model.calls[0]["messages"][0].content.lower()
+    assert "small wins" in system
+    assert "almost too small to fail" in system
+    assert "today" in system  # the first step must be doable now
+
+
+def test_next_win_skips_won_milestones() -> None:
+    roadmap = Roadmap(
+        goal="g",
+        milestones=[
+            Milestone(title="a", status="won"),
+            Milestone(title="b", status="pending"),
+        ],
+    )
+    assert roadmap.next_win is not None and roadmap.next_win.title == "b"
+    assert roadmap.won_count == 1
+
+
+def test_next_win_is_none_when_every_milestone_is_won() -> None:
+    roadmap = Roadmap(goal="g", milestones=[Milestone(title="a", status="won")])
+    assert roadmap.next_win is None
+
+
+async def test_planner_save_persists_the_roadmap() -> None:
+    store = MemoryStore()
+    planner = RoadmapPlanner(FakeModel([ROADMAP_JSON]), FakeClock())
+    roadmap = await planner.plan("get fit")
+
+    await planner.save(roadmap, store)
+
+    doc = await store.get(Collections.ROADMAPS, roadmap.id)
+    assert doc is not None and doc["goal"] == "get fit"
+
+
+async def test_wins_ledger_records_and_lists_newest_first() -> None:
+    store = MemoryStore()
+    clock = FakeClock()
+    ledger = WinsLedger(store, clock)
+
+    await ledger.record("laid out clothes", source="owner", goal="get fit")
+    clock.advance(minutes=1)
+    await ledger.record("walked five minutes", source="milestone", goal="get fit")
+
+    wins = await ledger.recent()
+    assert [w.text for w in wins] == ["walked five minutes", "laid out clothes"]
+    assert wins[0].source == "milestone"
+    assert wins[0].at is not None
+    assert all(w.goal == "get fit" for w in wins)
