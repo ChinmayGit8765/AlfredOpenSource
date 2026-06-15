@@ -198,7 +198,7 @@ async def _cmd_chat(fake: bool, config_path: str | None) -> int:
             line = line.strip()
             if not line or line.lower() in ("exit", "quit"):
                 break
-            with console.status("[chrome]ALFRED is thinking…[/]", spinner="dots"):
+            with console.status("[chrome]ALFRED is thinking...[/]", spinner="dots"):
                 await system.core.handle_inbound(
                     InboundMessage(channel="cli", text=line)
                 )
@@ -342,7 +342,7 @@ async def _cmd_demo_roundtrip(fake: bool, config_path: str | None) -> int:
             return 1
         model = build_model(config)
 
-    with console.status("[chrome]one structured call, validated…[/]", spinner="dots"):
+    with console.status("[chrome]one structured call, validated...[/]", spinner="dots"):
         plan = await structured_call(
             model,
             schema=Plan,
@@ -362,7 +362,7 @@ async def _cmd_demo_roundtrip(fake: bool, config_path: str | None) -> int:
             border_style="accent",
         )
     )
-    console.print("[ok]✓[/] validated: Plan")
+    console.print(f"[ok]{'✓' if ui.FANCY else '+'}[/] validated: Plan")
     return 0
 
 
@@ -406,7 +406,9 @@ async def _cmd_doctor(config_path: str | None) -> int:
 
     try:
         chosen = await _probe_ollama(config)
-        console.print(ui.check_line("ok", "ollama", f"{config.llm.host} · model {chosen}"))
+        console.print(
+            ui.check_line("ok", "ollama", f"{config.llm.host} {ui.DOT} model {chosen}")
+        )
     except Exception as exc:
         console.print(
             ui.check_line(
