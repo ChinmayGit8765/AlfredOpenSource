@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from alfred.domain.roadmap import RoadmapPlanner, WinsLedger
+from alfred.domain.roadmap import RoadmapPlanner, RoadmapService, WinsLedger
 from alfred.domain.schemas import Collections, Milestone, Roadmap
 from alfred.testing import FakeClock, FakeModel, MemoryStore
 
@@ -99,3 +99,113 @@ async def test_wins_ledger_records_and_lists_newest_first() -> None:
     assert wins[0].source == "milestone"
     assert wins[0].at is not None
     assert all(w.goal == "get fit" for w in wins)
+
+
+# ---------------------------------------------------------------------------
+# RoadmapService: the one live path the runtime drives
+# ---------------------------------------------------------------------------
+
+
+def _service(
+    store: MemoryStore, model: FakeModel, clock: FakeClock | None = None
+) -> RoadmapService:
+    clock = clock or FakeClock()
+    planner = RoadmapPlanner(model, clock)
+    wins = WinsLedger(store, clock)
+    return RoadmapService(planner, wins, store, clock)
+
+
+async def test_service_set_goal_persists_current_with_one_next_win() -> None:
+    store = MemoryStore()
+    service = _service(store, FakeModel([ROADMAP_JSON]))
+
+    roadmap = await service.set_goal("get fit", real_lever="move every morning")
+
+    assert roadmap.goal == "get fit"
+    current = await service.current()  # read back from the store, not the return
+    assert current is not None
+    assert current.real_lever == "move every morning"
+    assert current.next_win is not None
+    assert current.next_win.title == "Lay out clothes tonight"
+
+
+async def test_service_current_is_none_before_a_goal_is_set() -> None:
+    service = _service(MemoryStore(), FakeModel())
+    assert await service.current() is None
+
+
+async def test_service_complete_next_advances_and_logs_a_win() -> None:
+    store = MemoryStore()
+    service = _service(store, FakeModel([ROADMAP_JSON]))
+    await service.set_goal("get fit")
+
+    roadmap, won, new_next = await service.complete_next()
+
+    assert won is not None and won.title == "Lay out clothes tonight"
+    assert won.status == "won"
+    assert new_next is not None
+    assert new_next.title == "Walk five minutes after coffee"
+    assert new_next.status == "active"
+    assert roadmap is not None and roadmap.won_count == 1
+
+    # The win lands in the momentum ledger, sourced from the milestone.
+    wins = await service.recent_wins()
+    assert [w.text for w in wins] == ["Lay out clothes tonight"]
+    assert wins[0].source == "milestone"
+    assert wins[0].goal == "get fit"
+
+    # Persisted: a fresh read sees the advanced state, one active step.
+    reloaded = await service.current()
+    assert reloaded is not None
+    assert [m.status for m in reloaded.milestones] == ["won", "active", "pending"]
+
+
+async def test_service_complete_next_with_no_goal_is_a_no_op() -> None:
+    service = _service(MemoryStore(), FakeModel())
+    roadmap, won, new_next = await service.complete_next()
+    assert roadmap is None and won is None and new_next is None
+
+
+async def test_service_completing_the_last_win_finishes_the_road() -> None:
+    store = MemoryStore()
+    service = _service(store, FakeModel([ROADMAP_JSON]))
+    await service.set_goal("get fit")
+    await service.complete_next()
+    await service.complete_next()
+
+    roadmap, won, new_next = await service.complete_next()  # the third and last
+
+    assert won is not None and won.title == "Walk fifteen minutes"
+    assert new_next is None  # nothing left; the road is complete
+    assert roadmap is not None and roadmap.won_count == 3
+
+    # A further attempt finds nothing to win, never an error.
+    _, nothing, _ = await service.complete_next()
+    assert nothing is None
+
+
+async def test_service_set_goal_archives_the_previous_roadmap() -> None:
+    store = MemoryStore()
+    service = _service(store, FakeModel([ROADMAP_JSON]))
+    first = await service.set_goal("get fit")
+    second = await service.set_goal("learn guitar")
+
+    # The new goal is current; the old one is archived by its id, not lost.
+    current = await service.current()
+    assert current is not None and current.id == second.id and current.goal == "learn guitar"
+    archived = await store.get(Collections.ROADMAPS, first.id)
+    assert archived is not None and archived["goal"] == "get fit"
+
+
+async def test_service_record_win_logs_against_current_goal_without_advancing() -> None:
+    store = MemoryStore()
+    service = _service(store, FakeModel([ROADMAP_JSON]))
+    await service.set_goal("get fit")
+
+    win = await service.record_win("ran an unplanned 5k")
+
+    assert win.goal == "get fit"
+    assert win.source == "owner"
+    # A standalone win is momentum, not a milestone: the road does not advance.
+    current = await service.current()
+    assert current is not None and current.won_count == 0
