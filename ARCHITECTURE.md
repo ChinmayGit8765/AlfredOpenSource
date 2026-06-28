@@ -369,6 +369,47 @@ agents' current-week plans into every agent brief: agents share one
 picture of the owner, never private silos. Owner surface in core:
 remember / recall / memories / forget, plus "what do you know about X".
 
+### domain/roadmap.py: a goal as many small wins
+
+```python
+class RoadmapPlanner:
+    def __init__(self, model: ModelPort, clock: ClockPort) -> None
+    async def plan(self, goal: str, *, real_lever: str = "",
+                   context: str = "") -> Roadmap
+        # one structured_call -> Roadmap; then _enforce: goal/real_lever/
+        # created_at stamped, and EXACTLY one milestone left active (the
+        # first not-won), the rest pending. 3..7 small wins, first doable
+        # today, by the binding small-wins prompt.
+    async def save(self, roadmap: Roadmap, store: StorePort) -> None  # by id
+
+class WinsLedger:
+    def __init__(self, store: StorePort, clock: ClockPort) -> None
+    async def record(self, text, *, source="owner", goal=None) -> Win
+    async def recent(self, limit: int = 10) -> list[Win]   # newest first
+
+class RoadmapService:
+    def __init__(self, planner: RoadmapPlanner, wins: WinsLedger,
+                 store: StorePort, clock: ClockPort) -> None
+    async def current(self) -> Roadmap | None
+        # the one active roadmap, persisted at Collections.ROADMAPS key
+        # "current" (the same convention the profile uses)
+    async def set_goal(self, goal, *, real_lever="", context="") -> Roadmap
+        # archives the previous current by id (an abandoned path is data),
+        # plans a fresh one, persists it as current
+    async def complete_next(self) -> tuple[Roadmap | None, Milestone | None,
+                                           Milestone | None]
+        # marks the active milestone won, records a Win (source="milestone"),
+        # promotes the next pending to active, persists. Returns
+        # (roadmap, won, new_next); won is None when nothing was left to win
+    async def record_win(self, text, *, source="owner") -> Win   # side win
+    async def recent_wins(self, limit: int = 10) -> list[Win]
+```
+
+Owner surface in core: goal <goal> / roadmap / next / win [<text>] / wins.
+A bare win/won closes the active step; win <text> logs a side win without
+advancing. The stance is binding in the planner prompt and every reply:
+small wins, a lapse is data, no streaks or shame.
+
 ### Channel namespacing (binding for all transports)
 
 Channels carry their transport: "discord:<id>", "telegram:<chat_id>",
@@ -479,13 +520,16 @@ def materialise_agent(agents_dir: str | Path, blueprint: AgentBlueprint) -> Path
 # runtime/core.py
 class AlfredCore:
     # owns: registry, executor, conductor, builder, user model, governance,
-    # transport. Entry points:
+    # roadmap service, transport. Entry points:
     async def handle_inbound(self, message: InboundMessage) -> None
         # owner commands first (confirm/deny <id>, proposals, approve/reject
-        # <id>, agents, status, new agent <goal>), then builder-session
-        # continuation, then route() -> executor, multi-plan -> conductor.
-        # Replies via TransportPort.
+        # <id>, agents, status, goal/roadmap/next/win/wins, new agent <goal>),
+        # then builder-session continuation, then route() -> executor,
+        # multi-plan -> conductor. Replies via TransportPort.
     async def run_scheduled(self, trigger: ScheduledTrigger) -> None
+        # reasons: schedule / check_in / reflection / roadmap_nudge. The
+        # roadmap_nudge surfaces the one next small win, gently, and only
+        # when there is one to surface.
 
 # runtime/heartbeat.py
 class Heartbeat:
@@ -498,14 +542,16 @@ class Heartbeat:
     async def tick(self) -> list[ScheduledTrigger]   # due jobs, fired via core
     async def run_forever(self) -> None
     # due-ness: manifest Schedule + lifecycle check_in_interval + periodic
-    # reflection; quiet hours suppress proactive sends; last-run state in
+    # reflection + roadmap_nudge (config.roadmap_nudge_days, 0 disables);
+    # quiet hours suppress proactive sends; last-run state in
     # Collections.HEARTBEAT so restarts do not double-fire
 
 # runtime/composition.py
 def build_system(config: AlfredConfig, *, fake: bool = False,
                  transport: TransportPort | None = None) -> ComposedSystem
     # the single composition root; ComposedSystem dataclass exposes core,
-    # heartbeat, transport, store, registry, lapse_doctor for the CLI to drive.
+    # heartbeat, transport, store, registry, roadmap, lapse_doctor for the
+    # CLI to drive.
     # transport defaults to a SwitchableTransport slot the CLI fills later.
 def build_model(config: AlfredConfig) -> OllamaModelAdapter   # for CLI probe/demo
 def build_transports(config, handler) -> TransportSetup       # routes + CLI notes

@@ -13,9 +13,10 @@ their flourishing.
 
 Big tech's assistants are built to keep the user inside an app. ALFRED is
 built to make itself unnecessary, to get someone's life working so well that
-the tool fades into the background. It is local-first not as a privacy
-gimmick but as a statement of ownership: your intelligence, your keys, your
-machine, your side.
+the tool fades into the background. It works by the owner's side: it takes a
+goal and lays a roadmap of small wins, then walks them through it one step at
+a time. It is local-first not as a privacy gimmick but as a statement of
+ownership: your intelligence, your keys, your machine, your side.
 
 That is the destination. Build every decision toward it. But build it in
 order, smallest working piece first. A world-changing system that never ships
@@ -34,6 +35,24 @@ time.
 
 It is its own system: the runtime and orchestration are written from
 scratch, not built on an existing agent platform. This is deliberate.
+
+## Roadmap to goal: many small wins
+
+A goal is overwhelming; a single next step almost never is. ALFRED's headline
+move is to take a goal and lay a roadmap of milestones that are each almost
+too small to fail, then walk beside the owner through them one at a time.
+Exactly one milestone is active, so the owner faces one next step, never the
+whole mountain; each step has an observable done-signal and stacks onto an
+existing cue in the owner's day. Every completed step is recorded as a win in
+a running ledger, and a gentle proactive nudge surfaces the next step on a
+configurable cadence (suppressed in quiet hours, silent when there is nothing
+to surface). The stance is binding: progress is built from many small wins, a
+lapse is data and never a moral failure, and there are no streaks, no guilt,
+and no fake urgency.
+
+Owner surface: `goal <goal>` lays the path, `roadmap` shows it, `next` is just
+the one next win, `win` closes the active step and advances (or `win <text>`
+logs a side win without advancing), `wins` is the momentum log.
 
 ## Prime guardrail: from-scratch system, not from-scratch primitives
 
@@ -158,7 +177,10 @@ data.
 4. Conductor + Study and Build agents + concurrent-plan reconciliation.
 5. Adaptation, proactivity, accountability: user model, feedback loop,
    heartbeat, reflection, human-in-the-loop proposals.
-6. Horizon: MCP action layer (Calendar first), cross-system workflows, full
+6. Roadmap to goal: decompose a goal into a sequence of small wins, advance
+   one at a time, record wins, and nudge the next step. The by-your-side
+   small-wins core, wired through every transport and the heartbeat.
+7. Horizon: MCP action layer (Calendar first), cross-system workflows, full
    conversational Agent Builder.
 
 ## Engineering standards

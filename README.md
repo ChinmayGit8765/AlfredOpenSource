@@ -9,7 +9,7 @@
 [![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
-[![offline tests](https://img.shields.io/badge/tests-431%20offline-success)](tests/)
+[![offline tests](https://img.shields.io/badge/tests-462%20offline-success)](tests/)
 
 <img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
 
@@ -40,7 +40,7 @@ telemetry, no engagement loop, no account.
 
 ## Status
 
-Build-order phases 1 through 5 are implemented and tested:
+Build-order phases 1 through 6 are implemented and tested:
 
 1. **Model round-trip**: Python to Ollama to pydantic-validated structured
    output, with a bounded retry loop that feeds validation errors back to
@@ -56,8 +56,13 @@ Build-order phases 1 through 5 are implemented and tested:
 5. **Adaptation, proactivity, accountability**: persisted user model,
    outcome feedback loop, heartbeat scheduler, periodic reflection,
    human-in-the-loop proposals, and the Adaptive Agent Builder.
+6. **Roadmap to goal**: the headline small-wins capability. Set a goal and
+   ALFRED lays a path of milestones each almost too small to fail, surfaces
+   the one next step, advances it as you log wins, and nudges the next one
+   gently. Wired through every transport and the heartbeat (`alfred chat`,
+   then `goal <goal>`).
 
-Phase 6, the MCP action layer, is scaffolded and behind config: the
+The MCP action layer (the horizon's first step) is scaffolded and behind config: the
 `McpToolAdapter` is implemented (namespaced tools, per-tool capability
 tiers, destructive by default), the `mcp` dependency is an optional extra,
 and `mcp_servers` defaults to an empty list. No MCP server connects unless
@@ -154,6 +159,23 @@ The architecture in ten lines (full contract in
 6. Every tool call flows through one dispatcher: allowlist first (deny by
    default), then capability-tier gating, then audit.
 7. Tests run against real in-memory fakes, fully offline.
+
+### Roadmap to your goal: many small wins
+
+A goal is overwhelming; a single next step almost never is. Say `goal run a
+5k` and ALFRED lays a roadmap of milestones each *almost too small to fail*,
+each with an observable done-signal and anchored to an existing cue in your
+day. Exactly one milestone is active at a time, so you face one next step,
+never the whole mountain. `roadmap` shows the path, `next` shows just the one
+step, `win` marks it done and surfaces the next (or `win <text>` logs a side
+win without advancing), and `wins` is your running momentum log. The heartbeat
+nudges the next step gently on a configurable cadence (off in quiet hours,
+silent when there is nothing to surface).
+
+The stance is binding, in the planning prompt and in every reply: progress is
+many small wins, a lapse is data and never a moral failure, and there are no
+streaks, no guilt, and no fake urgency. Try the whole loop offline with
+`alfred chat --fake`, then `goal <anything you want>`.
 
 ### Agents are folders
 
@@ -281,6 +303,7 @@ defaults:
 | `heartbeat.tick_seconds` | `60` | scheduler wake interval |
 | `heartbeat.quiet_hours` | `22:30-07:30` | no proactive messages in this window |
 | `heartbeat.reflection_days` | `7` | reflection cadence |
+| `heartbeat.roadmap_nudge_days` | `1` | gentle next-win nudge cadence; `0` disables |
 | `policy.auto_approve_reversible` | `true` | reversible writes run without asking (audited) |
 | `policy.pending_action_ttl_hours` | `24` | gated actions expire after this |
 | `mcp_servers` | `[]` | MCP action layer; see config/mcp.example.yaml |

@@ -107,6 +107,11 @@ heartbeat:
   # Cadence of the periodic Conductor reflection, in days. Default: 7
   reflection_days: 7
 
+  # Cadence of the gentle "your next small win" nudge for the active goal
+  # roadmap, in days. The nudge only ever sends when a next win actually
+  # exists, and never during quiet hours. 0 disables it. Default: 1
+  roadmap_nudge_days: 1
+
 # Governance knobs. The defaults are the safe direction; loosen them
 # deliberately, never by accident.
 policy:
