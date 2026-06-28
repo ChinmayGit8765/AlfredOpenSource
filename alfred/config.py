@@ -102,6 +102,10 @@ class HeartbeatConfig(BaseModel):
     tick_seconds: int = Field(default=60, ge=5)
     quiet_hours: str = "22:30-07:30"  # "HH:MM-HH:MM" local; no proactive pings
     reflection_days: int = 7  # cadence of periodic Conductor reflection
+    # Cadence of the gentle "your next small win" nudge for the active roadmap.
+    # 0 disables it; the nudge only ever sends when a next win actually exists,
+    # and never during quiet hours. A surface, never a streak or a nag.
+    roadmap_nudge_days: int = Field(default=1, ge=0)
 
 
 class PolicyConfig(BaseModel):

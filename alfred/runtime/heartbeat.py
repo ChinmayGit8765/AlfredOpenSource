@@ -204,6 +204,19 @@ class Heartbeat:
                 due=lambda now, last: last is None or now - last >= reflection_every,
             )
         )
+        if self._config.roadmap_nudge_days > 0:
+            # A gentle surface of the owner's one next small win. Whether there
+            # is anything to surface is the core's call (it holds the roadmap);
+            # the heartbeat only owns the cadence.
+            nudge_every = timedelta(days=self._config.roadmap_nudge_days)
+            jobs.append(
+                _Job(
+                    job_id="roadmap_nudge",
+                    agent="",
+                    reason="roadmap_nudge",
+                    due=lambda now, last: last is None or now - last >= nudge_every,
+                )
+            )
         return jobs
 
     async def _last_run(self, job_id: str) -> datetime | None:

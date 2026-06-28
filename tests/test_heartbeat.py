@@ -60,6 +60,10 @@ def build(
     **config_kwargs: object,
 ) -> tuple[Heartbeat, MemoryStore, RecordingRunner]:
     config_kwargs.setdefault("quiet_hours", "")
+    # The roadmap nudge is its own concern; default it off so the other
+    # cadence tests stay about the job they exercise. test_roadmap_nudge_*
+    # enable it explicitly.
+    config_kwargs.setdefault("roadmap_nudge_days", 0)
     store = store or MemoryStore()
     runner = runner or RecordingRunner()
     heartbeat = Heartbeat(
@@ -288,6 +292,29 @@ async def test_reflection_cadence() -> None:
     clock.advance(days=7)
     fired = await heartbeat.tick()
     assert [t.reason for t in fired] == ["reflection"]
+
+
+async def test_roadmap_nudge_fires_on_its_cadence() -> None:
+    clock = FakeClock(MONDAY)
+    heartbeat, store, _ = build([], clock=clock, roadmap_nudge_days=1)
+
+    fired = await heartbeat.tick()  # no prior state: fires
+    assert any(t.reason == "roadmap_nudge" and t.agent == "" for t in fired)
+    assert await store.get(Collections.HEARTBEAT, "roadmap_nudge") is not None
+
+    clock.advance(hours=12)  # well short of a day
+    assert all(t.reason != "roadmap_nudge" for t in await heartbeat.tick())
+
+    clock.advance(days=1)
+    fired = await heartbeat.tick()
+    assert any(t.reason == "roadmap_nudge" for t in fired)
+
+
+async def test_roadmap_nudge_disabled_when_days_is_zero() -> None:
+    clock = FakeClock(MONDAY)
+    heartbeat, _, _ = build([], clock=clock, roadmap_nudge_days=0)
+    fired = await heartbeat.tick()
+    assert all(t.reason != "roadmap_nudge" for t in fired)
 
 
 async def test_crashing_runner_does_not_block_others_or_hot_loop() -> None:

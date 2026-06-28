@@ -38,6 +38,7 @@ from alfred.domain.lifecycle import LapseDoctor
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry
+from alfred.domain.roadmap import RoadmapPlanner, RoadmapService, WinsLedger
 from alfred.domain.schemas import InboundMessage
 from alfred.domain.user_model import UserModelService
 from alfred.errors import AlfredError, ToolNotFoundError
@@ -203,6 +204,35 @@ _DRY_RUN_ELICIT = {
     "real_lever": "dry-run lever (offline mode; no real elicitation happened)",
 }
 
+# A real (if generic) path so `chat --fake` demonstrates the headline
+# small-wins flow end to end offline: goal -> next win -> win -> advance. The
+# planner overwrites the goal with the owner's actual one and makes the first
+# milestone active.
+_DRY_RUN_ROADMAP = {
+    "goal": "set by the planner",
+    "real_lever": "dry-run lever (offline mode)",
+    "milestones": [
+        {
+            "title": "Name the one small first step",
+            "why": "a path starts the moment a doable step is named",
+            "done_signal": "the first step is written down",
+            "anchor": "right after reading this",
+        },
+        {
+            "title": "Do that step once",
+            "why": "a single rep proves it is small enough to not fail",
+            "done_signal": "it is done, however small",
+            "anchor": "after the first step is named",
+        },
+        {
+            "title": "Repeat it tomorrow",
+            "why": "a second rep is where momentum actually begins",
+            "done_signal": "done two days running",
+            "anchor": "the same cue, the next day",
+        },
+    ],
+}
+
 
 def _zero_value(prop: Mapping[str, Any], defs: Mapping[str, Any]) -> Any:
     """Type-appropriate zero value for one schema property, top level only."""
@@ -252,6 +282,8 @@ class DryRunModel:
                 return json.dumps(_DRY_RUN_REPLY)
             case "AgentBlueprint":
                 return json.dumps(_DRY_RUN_BLUEPRINT)
+            case "Roadmap":
+                return json.dumps(_DRY_RUN_ROADMAP)
             case "_ElicitStep":
                 return json.dumps(_DRY_RUN_ELICIT)
         defs = json_schema.get("$defs", {})
@@ -282,6 +314,7 @@ class ComposedSystem:
     builder: AgentBuilder
     reflection: ReflectionEngine
     lapse_doctor: LapseDoctor
+    roadmap: RoadmapService
     core: AlfredCore
     heartbeat: Heartbeat
     transport: TransportPort
@@ -334,6 +367,9 @@ def build_system(
     builder = AgentBuilder(model, user_model, store, clock)
     reflection = ReflectionEngine(model, user_model, store, clock)
     lapse_doctor = LapseDoctor(model, clock)
+    roadmap = RoadmapService(
+        RoadmapPlanner(model, clock), WinsLedger(store, clock), store, clock
+    )
 
     core = AlfredCore(
         registry,
@@ -346,6 +382,7 @@ def build_system(
         proposals,
         reflection,
         lapse_doctor,
+        roadmap,
         store,
         clock,
         transport,
@@ -383,6 +420,7 @@ def build_system(
         builder=builder,
         reflection=reflection,
         lapse_doctor=lapse_doctor,
+        roadmap=roadmap,
         core=core,
         heartbeat=heartbeat,
         transport=transport,

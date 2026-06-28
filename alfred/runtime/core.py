@@ -25,6 +25,7 @@ from alfred.domain.lifecycle import LapseDoctor, lapse_proposal
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry, LoadedAgent
+from alfred.domain.roadmap import RoadmapService
 from alfred.domain.routing import route
 from alfred.domain.schemas import (
     AdherenceStats,
@@ -35,12 +36,14 @@ from alfred.domain.schemas import (
     InboundMessage,
     LapseDiagnosis,
     Lifecycle,
+    Milestone,
     Outcome,
     Plan,
     Proposal,
     ProposalKind,
     ReconciledSchedule,
     Reflection,
+    Roadmap,
     ScheduledTrigger,
 )
 from alfred.domain.user_model import UserModelService
@@ -57,6 +60,11 @@ _HELP_TEXT = "\n".join(
         "ALFRED commands:",
         "- help: this summary",
         "- status: active agents, adherence, pending actions and proposals",
+        "- goal <goal>: lay a path to a goal as a sequence of small wins",
+        "- roadmap: show the path and your one next small win",
+        "- next: just the single next small win",
+        "- win: mark the next small win done (or 'win <text>' to log a side win)",
+        "- wins: your recent wins, newest first",
         "- agents: list every known agent",
         "- confirm <id> / deny <id>: rule on a gated tool action",
         "- proposals: list pending self-change proposals",
@@ -97,6 +105,7 @@ class AlfredCore:
         proposals: Proposals,
         reflection: ReflectionEngine,
         lapse_doctor: LapseDoctor,
+        roadmap: RoadmapService,
         store: StorePort,
         clock: ClockPort,
         transport: TransportPort,
@@ -114,6 +123,7 @@ class AlfredCore:
         self._proposals = proposals
         self._reflection = reflection
         self._lapse_doctor = lapse_doctor
+        self._roadmap = roadmap
         self._store = store
         self._clock = clock
         self._transport = transport
@@ -181,6 +191,10 @@ class AlfredCore:
                 self._registry, self._config.heartbeat.reflection_days
             )
             await self._send_scheduled(channel, self._render_reflection(reflection))
+            return
+
+        if trigger.reason == "roadmap_nudge":
+            await self._nudge_roadmap(channel)
             return
 
         agent = self._registry.get(trigger.agent)
@@ -348,6 +362,36 @@ class AlfredCore:
                 await self._send(channel, f"I have no memory with id {parts[1]}.")
             return True
 
+        # Roadmap to a goal: the headline move. One live path, one next small
+        # win, advanced a step at a time. 'win'/'won' alone closes the active
+        # step; 'win <text>' logs a side win without advancing the path.
+        if head == "goal" and len(parts) >= 2:
+            goal_text = text.split(maxsplit=1)[1].strip()
+            context = await self._memory.context_for(goal_text)
+            roadmap = await self._roadmap.set_goal(goal_text, context=context)
+            await self._send(channel, self._render_new_roadmap(roadmap))
+            return True
+        if lowered == "roadmap":
+            await self._send(channel, await self._render_roadmap())
+            return True
+        if lowered in ("next", "next win"):
+            await self._send(channel, await self._render_next_win())
+            return True
+        if lowered in ("win", "won"):
+            await self._send(channel, await self._complete_next_win())
+            return True
+        if head in ("win", "won") and len(parts) >= 2:
+            win = await self._roadmap.record_win(text.split(maxsplit=1)[1].strip())
+            await self._send(
+                channel,
+                f"Logged that win: {win.text}. Momentum is what counts here, "
+                "not streaks.",
+            )
+            return True
+        if lowered == "wins":
+            await self._send(channel, await self._render_wins())
+            return True
+
         goal = ""
         if lowered.startswith("new agent "):
             goal = text[len("new agent") :].strip()
@@ -405,6 +449,153 @@ class AlfredCore:
             lines.append(f"- [{memory.kind}] {memory.text}{when} [{memory.id}]")
         lines.append("Say 'forget <id>' to delete one.")
         return "\n".join(lines)
+
+    # --- roadmap rendering ------------------------------------------------
+
+    @staticmethod
+    def _milestone_lines(
+        milestone: Milestone, *, header: str = "Your next small win"
+    ) -> list[str]:
+        """The next-step block: title plus whichever of why/when/done are set."""
+        lines = [f"{header}: {milestone.title}"]
+        if milestone.why:
+            lines.append(f"  why: {milestone.why}")
+        if milestone.anchor:
+            lines.append(f"  when: {milestone.anchor}")
+        if milestone.done_signal:
+            lines.append(f"  done when: {milestone.done_signal}")
+        return lines
+
+    def _render_new_roadmap(self, roadmap: Roadmap) -> str:
+        nxt = roadmap.next_win
+        if nxt is None:
+            # No model, or nothing to decompose: be honest, never fake a path.
+            return (
+                f"Goal set: {roadmap.goal}. I could not lay out steps for it "
+                "right now (no model connected, or nothing to break down). Try "
+                "again with a model running."
+            )
+        lines = [
+            f"Here is the path to '{roadmap.goal}', laid out as "
+            f"{len(roadmap.milestones)} small wins, each almost too small to "
+            "fail. We take them one at a time.",
+            "",
+        ]
+        lines.extend(self._milestone_lines(nxt))
+        lines.append("Say 'win' when it is done, or 'roadmap' for the whole path.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _empty_path_text(goal: str) -> str:
+        """When a stored roadmap has no steps (a model could not decompose)."""
+        return (
+            f"Goal set: {goal}, but it has no steps yet. Say 'goal {goal}' "
+            "again with a model connected and I will break it into small wins."
+        )
+
+    async def _render_roadmap(self) -> str:
+        roadmap = await self._roadmap.current()
+        if roadmap is None:
+            return (
+                "No goal set yet. Say 'goal <something you want>' and I will lay "
+                "a path of small wins to it."
+            )
+        if not roadmap.milestones:
+            return self._empty_path_text(roadmap.goal)
+        lines = [
+            f"Goal: {roadmap.goal}",
+            f"Progress: {roadmap.won_count} of {len(roadmap.milestones)} wins.",
+        ]
+        nxt = roadmap.next_win
+        if nxt is None:
+            lines.append(
+                "Every step is done. Say 'goal <new goal>' when you are ready "
+                "for the next one."
+            )
+            return "\n".join(lines)
+        lines.append("")
+        lines.extend(self._milestone_lines(nxt))
+        later = [
+            m.title
+            for m in roadmap.milestones
+            if m.status == "pending" and m.id != nxt.id
+        ]
+        if later:
+            lines.append("Later, once that lands:")
+            lines.extend(f"  - {title}" for title in later)
+        lines.append("Say 'win' when the next one is done.")
+        return "\n".join(lines)
+
+    async def _render_next_win(self) -> str:
+        roadmap = await self._roadmap.current()
+        if roadmap is None:
+            return (
+                "No goal set yet. Say 'goal <something you want>' to lay a path "
+                "of small wins."
+            )
+        if not roadmap.milestones:
+            return self._empty_path_text(roadmap.goal)
+        nxt = roadmap.next_win
+        if nxt is None:
+            return (
+                f"Nothing left on the path to '{roadmap.goal}': every win is in. "
+                "Say 'goal <new goal>' for the next one."
+            )
+        return "\n".join(self._milestone_lines(nxt))
+
+    async def _complete_next_win(self) -> str:
+        roadmap, won, new_next = await self._roadmap.complete_next()
+        if roadmap is None:
+            return (
+                "No goal set yet, so there is no step to mark. Say 'goal "
+                "<something you want>' to start a path."
+            )
+        if not roadmap.milestones:
+            return self._empty_path_text(roadmap.goal)
+        if won is None:
+            return (
+                f"Every step toward '{roadmap.goal}' is already done. Say 'goal "
+                "<new goal>' for the next one."
+            )
+        lines = [f"That is a win: {won.title}. Logged, and it counts."]
+        if new_next is None:
+            lines.append(
+                f"That was the last step toward '{roadmap.goal}'. Goal reached. "
+                "Say 'goal <new goal>' when you want the next mountain."
+            )
+        else:
+            lines.append("")
+            lines.extend(self._milestone_lines(new_next))
+        return "\n".join(lines)
+
+    async def _render_wins(self) -> str:
+        wins = await self._roadmap.recent_wins(limit=10)
+        if not wins:
+            return (
+                "No wins logged yet. Say 'win' when you finish your next small "
+                "step, or 'win <text>' to log one now."
+            )
+        lines = ["Recent wins (newest first):"]
+        for win in wins:
+            when = f" ({win.at.date().isoformat()})" if win.at else ""
+            lines.append(f"- {win.text}{when}")
+        lines.append("Momentum, not streaks. Every one counts.")
+        return "\n".join(lines)
+
+    async def _nudge_roadmap(self, channel: str | None) -> None:
+        """Surface the one next small win, gently. Never a nag, never a streak.
+
+        Sends nothing when there is no active roadmap or nothing left to win,
+        so the daily cadence cannot become noise. Quiet hours are already
+        enforced by the heartbeat before this runs.
+        """
+        roadmap = await self._roadmap.current()
+        if roadmap is None or roadmap.next_win is None:
+            return
+        lines = [f"A gentle nudge on '{roadmap.goal}'. No rush, no streak."]
+        lines.extend(self._milestone_lines(roadmap.next_win))
+        lines.append("Reply 'win' when it is done.")
+        await self._send_scheduled(channel, "\n".join(lines))
 
     async def _confirm_action(self, channel: str, action_id: str) -> None:
         action = await self._pending.get(action_id)
@@ -752,8 +943,9 @@ class AlfredCore:
                 "No agents are active yet. Say 'new agent <goal>' to build the first one."
             )
         lines.append(
-            "Commands: help, status, agents, proposals, confirm <id>, deny <id>, "
-            "approve <id>, reject <id>, reflect, new agent <goal>, alfred stop."
+            "Commands: help, status, goal <goal>, roadmap, win, agents, "
+            "proposals, confirm <id>, deny <id>, approve <id>, reject <id>, "
+            "reflect, new agent <goal>, alfred stop."
         )
         return "\n".join(lines)
 
@@ -774,6 +966,12 @@ class AlfredCore:
                 )
         else:
             lines.append("No active agents.")
+        roadmap = await self._roadmap.current()
+        if roadmap is not None and roadmap.next_win is not None:
+            lines.append(
+                f"Goal '{roadmap.goal}': {roadmap.won_count} of "
+                f"{len(roadmap.milestones)} wins. Next: {roadmap.next_win.title}."
+            )
         lines.append(
             f"Pending actions: {len(actions)}. Pending proposals: {len(proposals)}."
         )
