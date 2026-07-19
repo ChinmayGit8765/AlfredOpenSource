@@ -266,6 +266,12 @@ class PendingAction(BaseModel):
     reason: str = ""
     status: Literal["pending", "confirmed", "rejected", "expired"] = "pending"
     created_at: datetime | None = None
+    # Every gated call from one agent run shares a bundle: the composed
+    # intent. Two or more members surface as one preview the owner rules on
+    # with a single confirm or deny; bundle_seq preserves emission order so
+    # a confirmed bundle executes the way the agent composed it.
+    bundle_id: str | None = None
+    bundle_seq: int = 0
 
 
 class ExecutionResult(BaseModel):

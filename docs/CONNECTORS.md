@@ -104,6 +104,10 @@ Start read-only. Widen to writes when you have seen the reads behave.
   `confirm <id>` or `deny <id>`. Turn the gate off once the workflow has
   earned trust.
 - `delete-event` asks every time, no exceptions.
+- When one ask needs several writes (an event AND a note in another
+  connector), they surface as one composed intent: a numbered preview you
+  `confirm` or `deny` once, executing in order, stopping at the first
+  failure. See [GOVERNANCE.md](GOVERNANCE.md).
 - Every decision, either way, is in the audit log.
 
 ## When things go wrong

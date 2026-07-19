@@ -48,7 +48,11 @@ class ToolDispatcher:
         self._pending = pending
 
     async def dispatch(
-        self, agent: LoadedAgent, call: ToolCall, provenance: Provenance
+        self,
+        agent: LoadedAgent,
+        call: ToolCall,
+        provenance: Provenance,
+        bundle_id: str | None = None,
     ) -> DispatchOutcome:
         agent_name = agent.manifest.name
 
@@ -111,18 +115,23 @@ class ToolDispatcher:
                 preview = "cross-system action: previewed before it runs (dry run)"
                 reason = f"{reason}; {preview}" if reason else preview
             action = await self._pending.create(
-                agent_name, call, spec.tier, provenance, reason=reason
+                agent_name,
+                call,
+                spec.tier,
+                provenance,
+                reason=reason,
+                bundle_id=bundle_id,
             )
-            await audit(
-                self._store,
-                self._clock,
-                "tool_gated",
-                agent=agent_name,
-                tool=call.tool,
-                tier=spec.tier.value,
-                provenance=provenance,
-                action_id=action.id,
-            )
+            gated: dict[str, object] = {
+                "agent": agent_name,
+                "tool": call.tool,
+                "tier": spec.tier.value,
+                "provenance": provenance,
+                "action_id": action.id,
+            }
+            if bundle_id is not None:
+                gated["bundle_id"] = bundle_id
+            await audit(self._store, self._clock, "tool_gated", **gated)
             return DispatchOutcome(pending=action)
 
         result = await self._tools.invoke(call.tool, call.args)

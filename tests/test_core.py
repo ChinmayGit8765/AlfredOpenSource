@@ -295,6 +295,116 @@ async def test_deny_rejects_pending_action(tmp_path: Path) -> None:
     assert any(f"Denied {action.id}" in t for t in sent_texts(world))
 
 
+def _two_write_world(tmp_path: Path, *, first_handler=None) -> "World":
+    """A world whose agent proposes two gated writes in one reply."""
+    tools = FakeTools()
+    tools.add(
+        "create_event",
+        tier=CapabilityTier.DESTRUCTIVE,
+        handler=first_handler or (lambda **kwargs: {"created": True}),
+    )
+    tools.add(
+        "write_note",
+        tier=CapabilityTier.DESTRUCTIVE,
+        handler=lambda **kwargs: {"written": True},
+    )
+    model = FakeModel(
+        [
+            agent_reply(
+                "Two writes need your sign-off.",
+                tool_calls=[
+                    {
+                        "tool": "create_event",
+                        "args": {"title": "long run"},
+                        "reason": "anchor the session",
+                    },
+                    {
+                        "tool": "write_note",
+                        "args": {"text": "week 1"},
+                        "reason": "log the plan",
+                    },
+                ],
+            )
+        ]
+    )
+    return make_world(
+        tmp_path,
+        model,
+        [
+            make_agent(
+                "training",
+                ["train"],
+                allowed_tools=["create_event", "write_note"],
+            )
+        ],
+        tools=tools,
+    )
+
+
+async def test_composed_intent_previews_and_confirms_as_one(tmp_path: Path) -> None:
+    world = _two_write_world(tmp_path)
+
+    await world.core.handle_inbound(inbound("train: set up my week"))
+
+    actions = await world.pending.list_pending()
+    assert len(actions) == 2
+    bundle = actions[0].bundle_id
+    assert bundle is not None
+    assert all(a.bundle_id == bundle for a in actions)
+    assert world.tools.invocations == []
+    # One composed preview naming the intent id, never two separate asks.
+    assert any(f"confirm {bundle}" in t for t in sent_texts(world))
+
+    await world.core.handle_inbound(inbound(f"confirm {bundle}"))
+
+    # Both ran, in emission order, off a single confirmation.
+    assert [name for name, _ in world.tools.invocations] == [
+        "create_event",
+        "write_note",
+    ]
+    assert await world.pending.list_pending() == []
+    assert any(f"Confirmed intent {bundle}" in t for t in sent_texts(world))
+
+
+async def test_composed_intent_denies_as_one(tmp_path: Path) -> None:
+    world = _two_write_world(tmp_path)
+
+    await world.core.handle_inbound(inbound("train: set up my week"))
+    actions = await world.pending.list_pending()
+    bundle = actions[0].bundle_id
+
+    await world.core.handle_inbound(inbound(f"deny {bundle}"))
+
+    assert world.tools.invocations == []
+    assert await world.pending.list_pending() == []
+    for action in actions:
+        resolved = await world.pending.get(action.id)
+        assert resolved is not None
+        assert resolved.status == "rejected"
+    assert any(f"Denied intent {bundle}" in t for t in sent_texts(world))
+
+
+async def test_composed_intent_stops_at_first_failure(tmp_path: Path) -> None:
+    def boom(**kwargs: object) -> dict[str, object]:
+        raise RuntimeError("calendar said no")
+
+    world = _two_write_world(tmp_path, first_handler=boom)
+
+    await world.core.handle_inbound(inbound("train: set up my week"))
+    bundle = (await world.pending.list_pending())[0].bundle_id
+
+    await world.core.handle_inbound(inbound(f"confirm {bundle}"))
+
+    # Step one failed, so step two never ran and is still the owner's call:
+    # a half-broken intent must not keep executing into the wreckage.
+    assert [name for name, _ in world.tools.invocations] == ["create_event"]
+    still = await world.pending.list_pending()
+    assert [a.call.tool for a in still] == ["write_note"]
+    texts = sent_texts(world)
+    assert any("calendar said no" in t for t in texts)
+    assert any("Stopped there" in t for t in texts)
+
+
 async def test_outcome_shorthand_records_outcome(tmp_path: Path) -> None:
     model = FakeModel([agent_reply("Nice work; logged.")])
     world = make_world(

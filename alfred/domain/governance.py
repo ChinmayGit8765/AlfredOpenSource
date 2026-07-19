@@ -92,7 +92,18 @@ class PendingActions:
         tier: CapabilityTier,
         provenance: Provenance,
         reason: str = "",
+        bundle_id: str | None = None,
     ) -> PendingAction:
+        seq = 0
+        if bundle_id is not None:
+            # Emission order within the intent. Counting the stored members
+            # (any status) is race-free here: the core serializes every
+            # handler behind one lock, so no two creations interleave.
+            seq = len(
+                await self._store.query(
+                    Collections.PENDING_ACTIONS, where={"bundle_id": bundle_id}
+                )
+            )
         action = PendingAction(
             agent=agent,
             call=call,
@@ -100,6 +111,8 @@ class PendingActions:
             provenance=provenance,
             reason=reason,
             created_at=self._clock.now(),
+            bundle_id=bundle_id,
+            bundle_seq=seq,
         )
         await self._save(action)
         return action
@@ -109,6 +122,19 @@ class PendingActions:
         if doc is None:
             return None
         return PendingAction.model_validate(_strip_key(doc))
+
+    async def bundle_members(self, bundle_id: str) -> list[PendingAction]:
+        """The still-pending members of one intent, in emission order.
+
+        Empty when the id names no live bundle, which is also how callers
+        tell a bundle id from a single action id.
+        """
+        members = [
+            action
+            for action in await self.list_pending()
+            if action.bundle_id == bundle_id
+        ]
+        return sorted(members, key=lambda action: action.bundle_seq)
 
     async def list_pending(self) -> list[PendingAction]:
         docs = await self._store.query(
@@ -148,15 +174,18 @@ class PendingActions:
         await self._save(resolved)
         # Refusals matter as much as executions in the audit trail: the
         # record must show gates closing, not only gates opening.
+        resolution: dict[str, object] = {
+            "action_id": resolved.id,
+            "agent": resolved.agent,
+            "tool": resolved.call.tool,
+            "tier": resolved.tier.value,
+            "approved": approved,
+        }
+        if resolved.bundle_id is not None:
+            # Members of one composed intent stay linkable in the record.
+            resolution["bundle_id"] = resolved.bundle_id
         await audit(
-            self._store,
-            self._clock,
-            "pending_action_resolved",
-            action_id=resolved.id,
-            agent=resolved.agent,
-            tool=resolved.call.tool,
-            tier=resolved.tier.value,
-            approved=approved,
+            self._store, self._clock, "pending_action_resolved", **resolution
         )
         return resolved
 

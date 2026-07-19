@@ -83,6 +83,34 @@ Unresolved actions expire after `policy.pending_action_ttl_hours` (default
 24). A stale action cannot be confirmed: the world may have moved on since
 it was gated, so a late `confirm` refuses and the action is marked expired.
 
+## Composed intents: cross-system workflows
+
+One ask often needs several writes across several systems: put the session
+on the calendar AND log it in the vault. Every call gated during one agent
+run shares a bundle, and when two or more gate together they surface as
+one composed intent instead of a pile of ids:
+
+```
+This needs 2 actions from training, previewed together as one intent (9b1c22d0aa41):
+  1. calendar.create-event (anchor the session) [3f2a91c40d77]
+  2. vault.write_note (log the plan) [c81d0e55b2f9]
+Say 'confirm 9b1c22d0aa41' to run all 2 in order, 'deny 9b1c22d0aa41' to
+reject them all, or rule on single ids.
+```
+
+- `confirm <intent-id>` executes the steps in the order the agent composed
+  them. Each step still passes the full per-action re-checks above.
+- The first step that fails stops the chain: what has not run stays
+  pending and untouched, so you rule on the remainder with the fault in
+  view instead of the intent executing into a half-broken state.
+- `deny <intent-id>` rejects every member at once; nothing runs.
+- Ruling on a single member by its own id always remains possible.
+
+The bundle changes how confirmation is ASKED, never whether it is needed:
+each member is gated by its own tier and provenance exactly as before, and
+each execution and refusal is audited individually, linked by the bundle
+id in the audit trail.
+
 ## Proposals: self-change with a human in the loop
 
 ALFRED never modifies itself silently. Changes to its own prompts,

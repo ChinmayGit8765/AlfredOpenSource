@@ -38,6 +38,7 @@ from alfred.domain.schemas import (
     Lifecycle,
     Milestone,
     Outcome,
+    PendingAction,
     Plan,
     Proposal,
     ProposalKind,
@@ -67,7 +68,8 @@ _HELP_TEXT = "\n".join(
         "- wins: your recent wins, newest first",
         "- agents: list every known agent",
         "- pending: list gated tool actions awaiting your confirmation",
-        "- confirm <id> / deny <id>: rule on a gated tool action",
+        "- confirm <id> / deny <id>: rule on a gated action, or on a whole",
+        "  composed intent at once when several actions share one intent id",
         "- proposals: list pending self-change proposals",
         "- approve <id> [confirm-safety] / reject <id>: rule on a proposal",
         "- reflect: run a strategy review now",
@@ -678,6 +680,11 @@ class AlfredCore:
     async def _confirm_action(self, channel: str, action_id: str) -> None:
         action = await self._pending.get(action_id)
         if action is None:
+            # Not a single action: the id may name a composed intent.
+            members = await self._pending.bundle_members(action_id)
+            if members:
+                await self._confirm_bundle(channel, action_id, members)
+                return
             await self._send(channel, f"I have no pending action with id {action_id}.")
             return
         agent = self._registry.get(action.agent)
@@ -698,7 +705,61 @@ class AlfredCore:
                 f"Confirmed {action_id}, but {action.call.tool} failed: {result.error}",
             )
 
+    async def _confirm_bundle(
+        self, channel: str, bundle_id: str, members: list[PendingAction]
+    ) -> None:
+        """Execute a composed intent's steps in emission order.
+
+        One confirm covers every member, but honesty rules the failure
+        path: the first step that fails stops the chain, and whatever has
+        not run stays pending so the owner rules on it with the fault in
+        view instead of it executing into a half-broken state.
+        """
+        lines: list[str] = []
+        for step, member in enumerate(members, start=1):
+            agent = self._registry.get(member.agent)
+            try:
+                result = await self._dispatcher.execute_confirmed(member.id, agent)
+            except AlfredError as exc:
+                lines.append(f"{step}. {member.call.tool}: could not execute ({exc})")
+                remaining = members[step:]
+                if remaining:
+                    ids = ", ".join(m.id for m in remaining)
+                    lines.append(
+                        f"Stopped there; still pending and untouched: {ids}. "
+                        "Rule on them individually once this is sorted."
+                    )
+                break
+            if result.ok:
+                lines.append(f"{step}. {member.call.tool}: done")
+                continue
+            lines.append(f"{step}. {member.call.tool}: failed ({result.error})")
+            remaining = members[step:]
+            if remaining:
+                ids = ", ".join(m.id for m in remaining)
+                lines.append(
+                    f"Stopped there; still pending and untouched: {ids}. "
+                    "Rule on them individually once this is sorted."
+                )
+            break
+        else:
+            lines.append(f"All {len(members)} steps of intent {bundle_id} ran.")
+        await self._send(
+            channel, f"Confirmed intent {bundle_id}:\n" + "\n".join(lines)
+        )
+
     async def _deny_action(self, channel: str, action_id: str) -> None:
+        # A composed intent denies as one thing, exactly as it confirmed.
+        members = await self._pending.bundle_members(action_id)
+        if members:
+            for member in members:
+                await self._pending.resolve(member.id, approved=False)
+            tools = ", ".join(m.call.tool for m in members)
+            await self._send(
+                channel,
+                f"Denied intent {action_id}: none of it will run ({tools}).",
+            )
+            return
         try:
             action = await self._pending.resolve(action_id, approved=False)
         except AlfredError as exc:
@@ -1028,12 +1089,56 @@ class AlfredCore:
         for reply in result.replies:
             await self._send(channel, reply)
         if result.pending:
-            lines = ["These actions need your confirmation before they run:"]
-            for action in result.pending:
+            await self._send(channel, self._render_gated(result.pending))
+
+    @staticmethod
+    def _render_gated(pending: list[PendingAction]) -> str:
+        """The confirmation ask for a run's gated actions.
+
+        Two or more actions sharing a bundle are one composed intent: they
+        are presented as numbered steps under the intent id the owner can
+        rule on once. Anything else renders as the familiar single lines.
+        """
+        bundles: dict[str, list[PendingAction]] = {}
+        for action in pending:
+            if action.bundle_id is not None:
+                bundles.setdefault(action.bundle_id, []).append(action)
+        composed = {
+            bid: sorted(members, key=lambda a: a.bundle_seq)
+            for bid, members in bundles.items()
+            if len(members) > 1
+        }
+        lines: list[str] = []
+        for bid, members in composed.items():
+            lines.append(
+                f"This needs {len(members)} actions from {members[0].agent}, "
+                f"previewed together as one intent ({bid}):"
+            )
+            for step, action in enumerate(members, start=1):
                 reason = action.reason or "no reason given"
-                lines.append(f"- {action.id}: {action.call.tool} ({reason})")
-            lines.append("Say 'confirm <id>' to execute one, or 'deny <id>' to reject it.")
-            await self._send(channel, "\n".join(lines))
+                lines.append(
+                    f"  {step}. {action.call.tool} ({reason}) [{action.id}]"
+                )
+            lines.append(
+                f"Say 'confirm {bid}' to run all {len(members)} in order, "
+                f"'deny {bid}' to reject them all, or rule on single ids."
+            )
+        singles = [
+            action
+            for action in pending
+            if action.bundle_id not in composed
+        ]
+        if singles:
+            lines.append("These actions need your confirmation before they run:")
+            for action in singles:
+                reason = action.reason or "no reason given"
+                lines.append(
+                    f"- {action.id}: {action.call.tool} by {action.agent} ({reason})"
+                )
+            lines.append(
+                "Say 'confirm <id>' to execute one, or 'deny <id>' to reject it."
+            )
+        return "\n".join(lines)
 
     async def _latest_plan(self, agent_name: str) -> Plan | None:
         # Newest window only: append keys are chronological, so the latest
@@ -1141,18 +1246,13 @@ class AlfredCore:
 
     async def _render_pending(self) -> str:
         # Rendered via list_pending() on purpose: it expires stale actions
-        # on read, so nothing expired can resurface as confirmable.
+        # on read, so nothing expired can resurface as confirmable. Shares
+        # _render_gated so composed intents group here exactly as they did
+        # when first surfaced.
         actions = await self._pending.list_pending()
         if not actions:
             return "No pending actions."
-        lines = ["Actions awaiting your confirmation:"]
-        for action in actions:
-            reason = action.reason or "no reason given"
-            lines.append(
-                f"- {action.id}: {action.call.tool} by {action.agent} ({reason})"
-            )
-        lines.append("Say 'confirm <id>' to execute one, or 'deny <id>' to reject it.")
-        return "\n".join(lines)
+        return self._render_gated(actions)
 
     async def _render_proposals(self) -> str:
         pending = await self._proposals.list_pending()

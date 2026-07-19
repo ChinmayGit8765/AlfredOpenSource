@@ -182,6 +182,38 @@ async def test_plan_from_planless_agent_is_dropped_not_persisted():
     assert any(doc.get("plan_dropped") for doc in audits)
 
 
+async def test_gated_calls_from_one_run_share_a_bundle():
+    tools = FakeTools()
+    tools.add("create_event", tier=CapabilityTier.DESTRUCTIVE)
+    tools.add("write_note", tier=CapabilityTier.DESTRUCTIVE)
+    model = FakeModel(
+        [
+            reply_json(
+                reply="both need your sign-off",
+                tool_calls=[
+                    {"tool": "create_event", "args": {"title": "long run"}},
+                    {"tool": "write_note", "args": {"text": "week 1 begins"}},
+                ],
+            )
+        ]
+    )
+    executor, _, _, _ = make_executor(model, tools=tools)
+
+    result = await executor.run(
+        make_agent(allowed=["create_event", "write_note"]),
+        text="set up my week",
+        provenance="owner",
+    )
+
+    # One run is one intent: both gated calls share a bundle, in emission
+    # order, so the core can surface them as a single composed preview.
+    assert len(result.pending) == 2
+    first, second = result.pending
+    assert first.bundle_id is not None
+    assert first.bundle_id == second.bundle_id
+    assert (first.bundle_seq, second.bundle_seq) == (0, 1)
+
+
 async def test_observations_are_recorded():
     model = FakeModel(
         [reply_json(reply="noted", observations=["prefers morning sessions"])]

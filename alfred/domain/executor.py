@@ -25,6 +25,7 @@ from alfred.domain.schemas import (
     Plan,
     Provenance,
     ToolCall,
+    new_id,
 )
 from alfred.domain.structured import structured_call
 from alfred.domain.user_model import UserModelService
@@ -106,6 +107,10 @@ class AgentExecutor:
         name = agent.manifest.name
         system = await self._assemble_system_prompt(agent, inbound_text=text)
         result = ExecutionResult(agent=name)
+        # One run is one intent: every call gated during it shares this
+        # bundle, so several writes across systems surface to the owner as
+        # one composed preview with one confirm, not a pile of ids.
+        bundle_id = new_id()
 
         conversation: list[ModelMessage] = []
         current_user = text
@@ -172,7 +177,9 @@ class AgentExecutor:
             fed_back = 0
             for call in reply.tool_calls:
                 tool_call_count += 1
-                feedback = await self._handle_tool_call(agent, call, provenance, result)
+                feedback = await self._handle_tool_call(
+                    agent, call, provenance, result, bundle_id
+                )
                 conversation.append(ModelMessage(role="tool", content=feedback))
                 fed_back += 1
 
@@ -288,10 +295,13 @@ class AgentExecutor:
         call: ToolCall,
         provenance: Provenance,
         result: ExecutionResult,
+        bundle_id: str,
     ) -> str:
         """Dispatch one tool call; return the tool message to feed back."""
         try:
-            outcome = await self._dispatcher.dispatch(agent, call, provenance)
+            outcome = await self._dispatcher.dispatch(
+                agent, call, provenance, bundle_id=bundle_id
+            )
         except (ToolNotAllowedError, ToolNotFoundError) as exc:
             # The dispatcher already audited the violation; the run must
             # survive and the model must hear an honest refusal.

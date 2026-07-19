@@ -9,7 +9,7 @@
 [![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
-[![offline tests](https://img.shields.io/badge/tests-514%20offline-success)](tests/)
+[![offline tests](https://img.shields.io/badge/tests-518%20offline-success)](tests/)
 
 <img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
 
@@ -308,7 +308,10 @@ touching safety settings demands an extra `confirm-safety` token.
 false to gate everything above read-only.
 
 Gated actions surface with an id; rule on them in chat with `confirm <id>`
-or `deny <id>`. Unconfirmed actions expire after 24 hours. Allowlists are
+or `deny <id>`. When one ask needs several writes (calendar AND notes),
+they surface as one composed intent you confirm or deny with a single id,
+executing in order and stopping honestly at the first failure.
+Unconfirmed actions expire after 24 hours. Allowlists are
 deny-by-default and only the owner widens them. And until you trust a
 workflow, any write that reaches an external system (a tool from an MCP
 server, not a built-in one) is previewed for your confirmation before it
@@ -366,9 +369,11 @@ The horizon, in order (see [docs/SPEC.md](docs/SPEC.md)):
   read-only tools auto-approved, event writes gated, and doctor verifying
   the wiring live. Connecting yours is
   [docs/CONNECTORS.md](docs/CONNECTORS.md).
-- **Cross-system workflows**: one intent composed across several connected
-  systems. The dry-run preview gate for cross-system writes is already in
-  place; composing a single intent across systems is the work that remains.
+- **Cross-system workflows**: landed. The writes one intent needs across
+  several systems preview together as one composed intent with one
+  `confirm`; steps execute in order and the first failure stops the chain
+  with the remainder left pending, untouched. Each member still passes its
+  own tier, allowlist, and audit ([docs/GOVERNANCE.md](docs/GOVERNANCE.md)).
 - **Expanding MCP surface**: every server the owner connects becomes a
   capability behind `ToolPort`; no bespoke integrations, ever.
 - **Autonomy dial**: confirmation requirements that relax per workflow as
