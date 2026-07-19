@@ -22,6 +22,7 @@ from alfred.domain.schemas import (
     Outcome,
     OutcomeStatus,
     UserProfile,
+    load_or_none,
 )
 from alfred.ports import ClockPort, StorePort
 
@@ -63,7 +64,23 @@ class UserModelService:
         doc = await self._store.get(Collections.PROFILE, _PROFILE_KEY)
         if doc is None:
             return UserProfile()
-        return UserProfile.model_validate(_without_key(doc))
+        profile = load_or_none(UserProfile, doc, source=Collections.PROFILE)
+        if profile is None:
+            # Never silently default over a drifted profile: transaction()
+            # saves on exit, so a default here would let the next write
+            # destroy the only copy. Quarantine the original first; the
+            # fresh default that follows is then recoverable by hand.
+            await self._store.put(
+                Collections.PROFILE,
+                f"unreadable-{self._clock.now().isoformat()}",
+                _without_key(doc),
+            )
+            logger.error(
+                "stored profile no longer validates; quarantined a copy and "
+                "starting from a fresh default"
+            )
+            return UserProfile()
+        return profile
 
     async def save_profile(self, profile: UserProfile) -> None:
         profile.version += 1
@@ -128,7 +145,11 @@ class UserModelService:
         docs = await self._store.query(
             Collections.OBSERVATIONS, limit=limit, newest_first=True
         )
-        return [Observation.model_validate(_without_key(doc)) for doc in docs]
+        loaded = [
+            load_or_none(Observation, doc, source=Collections.OBSERVATIONS)
+            for doc in docs
+        ]
+        return [obs for obs in loaded if obs is not None]
 
     async def recent_outcomes(
         self, agent: str | None = None, limit: int = 20
@@ -137,7 +158,10 @@ class UserModelService:
         docs = await self._store.query(
             Collections.OUTCOMES, where=where, limit=limit, newest_first=True
         )
-        return [Outcome.model_validate(_without_key(doc)) for doc in docs]
+        loaded = [
+            load_or_none(Outcome, doc, source=Collections.OUTCOMES) for doc in docs
+        ]
+        return [outcome for outcome in loaded if outcome is not None]
 
     async def summary_for_prompt(self) -> str:
         """Compact plain-text profile rendering for inclusion in agent prompts."""
@@ -159,8 +183,16 @@ class UserModelService:
             for name in sorted(profile.adherence):
                 stats = profile.adherence[name]
                 signal = adherence_signal(stats)
-                if stats.total == 0:
-                    lines.append(f"- {name}: {signal} (no outcomes logged yet)")
+                if stats.engaged == 0:
+                    # All-skips records land here too: deliberate skips
+                    # carry no follow-through signal, and a skip must never
+                    # render as a lapse.
+                    note = (
+                        f"{stats.skipped} deliberate skip(s), no engaged outcomes"
+                        if stats.skipped
+                        else "no outcomes logged yet"
+                    )
+                    lines.append(f"- {name}: {signal} ({note})")
                 else:
                     lines.append(
                         f"- {name}: {signal} (rate {round(stats.rate * 100)}%, "

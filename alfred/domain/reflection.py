@@ -183,12 +183,24 @@ class ReflectionEngine:
         self, registry: AgentRegistry, profile: UserProfile
     ) -> list[Proposal]:
         created: list[Proposal] = []
+        # Guard against piling up duplicates while one is pending (the same
+        # rule the lapse doctor applies): an unruled proposal would otherwise
+        # be re-created every reflection cycle forever, and the stack of
+        # stale duplicates also mutes the lapse diagnosis for that agent.
+        pending = await self._proposals.list_pending()
         for agent in registry.active():
             name = agent.manifest.name
             current = agent.manifest.lifecycle
             stats = profile.adherence.get(name, AdherenceStats())
             proposed = next_lifecycle(current, stats)
             if proposed == current:
+                continue
+            if any(
+                p.kind is ProposalKind.LIFECYCLE_CHANGE
+                and p.agent == name
+                and p.new == proposed.value
+                for p in pending
+            ):
                 continue
             proposal = Proposal(
                 kind=ProposalKind.LIFECYCLE_CHANGE,

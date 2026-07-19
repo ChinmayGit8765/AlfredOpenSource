@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from alfred.adapters.ollama_model import OllamaModelAdapter
@@ -66,6 +67,19 @@ class FailingClient:
 
     async def list(self) -> Any:
         raise ConnectionError("Failed to connect to Ollama.")
+
+
+class TimeoutClient:
+    """Simulates the raw httpx timeouts ollama lets escape unwrapped."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def chat(self, **kwargs: Any) -> Any:
+        raise self._exc
+
+    async def list(self) -> Any:
+        raise self._exc
 
 
 def make_adapter(
@@ -200,3 +214,33 @@ async def test_ensure_model_ignores_nameless_entries() -> None:
         StubClient(models=[None, "qwen3:8b"]), name="qwen3:8b"
     )
     assert await adapter.ensure_model() == "qwen3:8b"
+
+
+def test_default_client_has_finite_timeouts() -> None:
+    # No injected client: constructing ollama.AsyncClient opens no
+    # connection, so this stays offline. The ollama package defaults
+    # timeout to None (infinite), and with the runtime serialized behind
+    # one handler lock a single hung generation would deadlock everything;
+    # this pins the guard against a silent regression.
+    adapter = OllamaModelAdapter(ModelConfig())
+    timeout = adapter._client._client.timeout
+    assert timeout.connect is not None
+    assert timeout.read is not None
+
+
+async def test_complete_wraps_read_timeout_as_alfred_error() -> None:
+    adapter, config = make_adapter(TimeoutClient(httpx.ReadTimeout("slow")))
+    with pytest.raises(AlfredError) as excinfo:
+        await adapter.complete(MESSAGES)
+    message = str(excinfo.value)
+    assert "timed out" in message
+    assert config.host in message
+
+
+async def test_ensure_model_wraps_connect_timeout_as_alfred_error() -> None:
+    adapter, config = make_adapter(TimeoutClient(httpx.ConnectTimeout("no route")))
+    with pytest.raises(AlfredError) as excinfo:
+        await adapter.ensure_model()
+    message = str(excinfo.value)
+    assert "timed out" in message
+    assert config.host in message

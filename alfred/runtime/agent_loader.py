@@ -10,6 +10,7 @@ refuses to overwrite an existing agent).
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 import yaml
@@ -43,12 +44,20 @@ def _load_one(folder: Path) -> LoadedAgent:
     return LoadedAgent(manifest=manifest, prompt=prompt, path=str(folder))
 
 
-def load_agents(agents_dir: str | Path) -> AgentRegistry:
+def load_agents(
+    agents_dir: str | Path,
+    *,
+    skipped: list[tuple[str, str]] | None = None,
+) -> AgentRegistry:
     """Scan agents_dir for agent folders and return the populated registry.
 
     Only immediate subdirectories containing manifest.yaml are considered.
     A folder that fails to load for any reason (bad YAML, invalid manifest,
-    missing agent.md) is logged at warning and skipped, never fatal.
+    missing agent.md) is logged at warning and skipped, never fatal. Pass
+    `skipped` to also collect (folder_name, reason) per skip: a log line
+    nobody watches is not enough when a version rollback silently unloads
+    an agent, so the runtime surfaces skips in 'agents', 'status', and
+    doctor.
     """
     registry = AgentRegistry()
     root = Path(agents_dir)
@@ -63,6 +72,10 @@ def load_agents(agents_dir: str | Path) -> AgentRegistry:
             agent = _load_one(folder)
         except Exception as exc:
             logger.warning("skipping agent folder %s: %s", folder, exc)
+            if skipped is not None:
+                # One truncated line per folder: the reason lands in owner
+                # replies, and a mangled YAML error must not flood them.
+                skipped.append((folder.name, str(exc).replace("\n", " ")[:160]))
             continue
         registry.add(agent)
         logger.info(
@@ -82,11 +95,18 @@ def materialise_agent(agents_dir: str | Path, blueprint: AgentBlueprint) -> Path
     folder = Path(agents_dir) / blueprint.manifest.name
     if folder.exists():
         raise AlfredError(f"agent folder already exists, refusing to overwrite: {folder}")
-    folder.mkdir(parents=True)
-    (folder / _MANIFEST_FILE).write_text(
-        render_manifest_yaml(blueprint.manifest), encoding="utf-8"
-    )
-    (folder / _PROMPT_FILE).write_text(blueprint.prompt_md, encoding="utf-8")
-    (folder / _STATE_DIR).mkdir()
+    try:
+        folder.mkdir(parents=True)
+        (folder / _MANIFEST_FILE).write_text(
+            render_manifest_yaml(blueprint.manifest), encoding="utf-8"
+        )
+        (folder / _PROMPT_FILE).write_text(blueprint.prompt_md, encoding="utf-8")
+        (folder / _STATE_DIR).mkdir()
+    except OSError:
+        # A half-written folder would poison this slug forever: the next
+        # attempt hits the overwrite refusal above. Best-effort cleanup so
+        # a retry after the disk problem clears can actually succeed.
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     logger.info("materialised agent %s at %s", blueprint.manifest.name, folder)
     return folder

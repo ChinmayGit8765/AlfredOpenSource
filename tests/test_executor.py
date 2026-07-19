@@ -161,6 +161,27 @@ async def test_explicit_week_of_is_preserved():
     assert result.plan.week_of == date(2026, 2, 2)
 
 
+async def test_plan_from_planless_agent_is_dropped_not_persisted():
+    # The scheduled planning prompt goes to every agent, so a meta agent
+    # (emits_plans=false) will sometimes obey it; the flag must keep that
+    # plan out of the result, the store, and therefore the Conductor.
+    plan = Plan(items=[PlanItem(title="audit the week", load=1)])
+    model = FakeModel([reply_json(reply="findings", plan=plan.model_dump(mode="json"))])
+    executor, store, _, _ = make_executor(model)
+    manifest = AgentManifest(
+        name="qa", description="meta reviewer", emits_plans=False
+    )
+    agent = LoadedAgent(manifest=manifest, prompt="You review, never plan.")
+
+    result = await executor.run(agent, text="produce this week's plan", provenance="scheduler")
+
+    assert result.plan is None
+    assert await store.query(Collections.PLANS) == []
+    assert result.replies == ["findings"]  # the reply itself still lands
+    audits = await store.query(Collections.AUDIT)
+    assert any(doc.get("plan_dropped") for doc in audits)
+
+
 async def test_observations_are_recorded():
     model = FakeModel(
         [reply_json(reply="noted", observations=["prefers morning sessions"])]

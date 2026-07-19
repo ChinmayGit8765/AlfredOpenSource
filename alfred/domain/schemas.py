@@ -8,20 +8,51 @@ engine validates and the defaults absorb what the model omits.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from alfred.ports.model import ModelOptions
 from alfred.ports.tools import CapabilityTier
+
+logger = logging.getLogger(__name__)
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
 def new_id() -> str:
     """Short unique id for domain objects. Not time-ordered; store keys are."""
     return uuid.uuid4().hex[:12]
+
+
+def load_or_none(
+    model: type[_ModelT], doc: Mapping[str, Any], *, source: str = ""
+) -> _ModelT | None:
+    """Validate one stored document, or None when it no longer parses.
+
+    Stored rows outlive schema changes. Without this guard, one legacy row
+    written by an older (or newer) release turns every read of its
+    collection into a crash, which cascades into prompt assembly and takes
+    the whole system down. A drifted row degrades to a logged skip instead.
+    The doc's contents stay out of the log: rows can hold personal data.
+    """
+    data = {k: v for k, v in doc.items() if k != "_key"}
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        logger.warning(
+            "skipping unreadable stored %s%s (key=%s): %d validation error(s)",
+            model.__name__,
+            f" in {source}" if source else "",
+            doc.get("_key", "?"),
+            exc.error_count(),
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +171,11 @@ class AgentManifest(BaseModel):
     schedule: Schedule = Field(default_factory=Schedule)
     allowed_tools: list[str] = Field(default_factory=list)
     capacity_cost: int = Field(default=0, ge=0, le=20)
+    # False for meta agents (qa, scout): the executor discards any plan the
+    # model emits, so a reviewer can never join the week it reviews. The
+    # prompt asks nicely; this flag is what actually keeps the Conductor,
+    # the plans store, and the peer digests clean.
+    emits_plans: bool = True
     model: ModelOptions | None = None
 
 

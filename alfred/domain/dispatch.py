@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from alfred.domain.governance import PendingActions, Policy, audit
 from alfred.domain.registry import LoadedAgent
-from alfred.domain.schemas import PendingAction, Provenance, ToolCall
+from alfred.domain.schemas import Lifecycle, PendingAction, Provenance, ToolCall
 from alfred.errors import ToolNotAllowedError, ToolNotFoundError
 from alfred.ports.clock import ClockPort
 from alfred.ports.store import StorePort
@@ -84,6 +84,28 @@ class ToolDispatcher:
         if self._policy.requires_confirmation(
             spec.tier, provenance, cross_system=cross_system
         ):
+            # A model that ignores "awaits confirmation" feedback re-emits
+            # the same gated call every round; without this reuse the owner
+            # would face several confirm ids for one intent, and confirming
+            # each would execute the destructive tool once per id.
+            for existing in await self._pending.list_pending():
+                if (
+                    existing.agent == agent_name
+                    and existing.call.tool == call.tool
+                    and existing.call.args == call.args
+                ):
+                    await audit(
+                        self._store,
+                        self._clock,
+                        "tool_gated",
+                        agent=agent_name,
+                        tool=call.tool,
+                        tier=spec.tier.value,
+                        provenance=provenance,
+                        action_id=existing.id,
+                        detail="reused existing pending action",
+                    )
+                    return DispatchOutcome(pending=existing)
             reason = call.reason
             if cross_system and self._policy.dry_run_cross_system:
                 preview = "cross-system action: previewed before it runs (dry run)"
@@ -139,6 +161,27 @@ class ToolDispatcher:
                 f"confirmed action {action_id} refused"
             )
 
+        if agent.manifest.lifecycle in (Lifecycle.PAUSED, Lifecycle.RETIRED):
+            # Gated actions do not survive retirement or pausing: authority
+            # comes from the CURRENT lifecycle, never the one at gating
+            # time, or pausing a misbehaving agent would not stop its
+            # already-queued writes.
+            await audit(
+                self._store,
+                self._clock,
+                "tool_denied",
+                agent=agent.manifest.name,
+                tool=action.call.tool,
+                provenance=action.provenance,
+                action_id=action_id,
+                detail=f"agent is {agent.manifest.lifecycle.value}",
+            )
+            raise ToolNotAllowedError(
+                f"agent '{agent.manifest.name}' is {agent.manifest.lifecycle.value}; "
+                f"its gated actions no longer execute. Restore the agent's "
+                f"lifecycle first if this action should still run."
+            )
+
         if action.call.tool not in agent.manifest.allowed_tools:
             # Allowlist revoked between gating and confirmation: the
             # CURRENT manifest wins, never the snapshot from gating time.
@@ -157,7 +200,24 @@ class ToolDispatcher:
                 f"tool '{action.call.tool}'"
             )
 
-        result = await self._tools.invoke(action.call.tool, action.call.args)
+        try:
+            result = await self._tools.invoke(action.call.tool, action.call.args)
+        except Exception:
+            # The confirmation was consumed but nothing ran (tool vanished,
+            # server down). Reopen so the owner can confirm again once the
+            # fault is fixed; the deliberate refusals above stay consumed.
+            await self._pending.reopen(action_id)
+            await audit(
+                self._store,
+                self._clock,
+                "execution_failed",
+                agent=agent.manifest.name,
+                tool=action.call.tool,
+                tier=action.tier.value,
+                provenance=action.provenance,
+                action_id=action_id,
+            )
+            raise
         await audit(
             self._store,
             self._clock,

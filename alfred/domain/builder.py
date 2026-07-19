@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -27,6 +28,7 @@ from alfred.domain.schemas import (
     Lifecycle,
     Schedule,
     TargetShape,
+    load_or_none,
 )
 from alfred.domain.structured import structured_call
 from alfred.errors import AlfredError
@@ -201,11 +203,18 @@ class AgentBuilder:
         user_model: UserModelService,
         store: StorePort,
         clock: ClockPort,
+        taken_names: Callable[[], set[str]] | None = None,
     ) -> None:
         self._model = model
         self._user_model = user_model
         self._store = store
         self._clock = clock
+        # The registry only knows folders that LOADED. A folder on disk
+        # with a broken manifest is invisible to it, and naming a new agent
+        # after one makes materialisation fail after approval. The injected
+        # provider (wired in composition, like any port) reports what is
+        # actually on disk so naming avoids it up front.
+        self._taken_names = taken_names
 
     # --- public surface -----------------------------------------------------
 
@@ -300,19 +309,52 @@ class AgentBuilder:
 
     async def active_session(self) -> BuilderSession | None:
         docs = await self._store.query(Collections.BUILDER_SESSIONS)
-        sessions: list[BuilderSession] = []
+        open_sessions: list[BuilderSession] = []
         for doc in docs:
-            doc = dict(doc)
-            doc.pop("_key", None)
-            sessions.append(BuilderSession.model_validate(doc))
-        open_sessions = [
-            s
-            for s in sessions
-            if s.stage not in (BuilderStage.DONE, BuilderStage.ABANDONED)
-        ]
+            # Closed sessions are dead history: filter on the RAW stage
+            # before validating, so a drifted legacy row from an older
+            # release can never brick every non-command message (this is
+            # called on each one). A missing stage falls through to
+            # validation: the model default is ELICITING, which is open.
+            if doc.get("stage") in (
+                BuilderStage.DONE.value,
+                BuilderStage.ABANDONED.value,
+            ):
+                continue
+            session = load_or_none(
+                BuilderSession, doc, source=Collections.BUILDER_SESSIONS
+            )
+            if session is None:
+                continue
+            if session.stage not in (BuilderStage.DONE, BuilderStage.ABANDONED):
+                open_sessions.append(session)
         if not open_sessions:
             return None
         return max(open_sessions, key=lambda s: s.updated_at or s.created_at or _EPOCH)
+
+    async def reopen(self, session_id: str) -> BuilderSession | None:
+        """Return an approved session to AWAITING_APPROVAL after a failed write.
+
+        Approval marks the session DONE before the runtime writes the
+        folder; when that write fails (name collision with a loader-invisible
+        folder, disk error) the elicited lever and blueprint must survive so
+        the owner can rename or retry instead of redoing the conversation.
+        Returns None when the session is unknown or holds no blueprint.
+        """
+        session = await self.get_session(session_id)
+        if session is None or session.blueprint is None:
+            return None
+        session.stage = BuilderStage.AWAITING_APPROVAL
+        # Nothing went live, so the approval's lifecycle flip is undone.
+        session.blueprint.manifest.lifecycle = Lifecycle.PROPOSED
+        session.transcript.append(
+            {
+                "role": "alfred",
+                "text": "(writing the agent folder failed; the build is open again)",
+            }
+        )
+        await self._save(session)
+        return session
 
     async def abandon_active(self) -> str | None:
         """Abandon the most recent open session; returns its id when one existed.
@@ -515,14 +557,22 @@ class AgentBuilder:
         )
         return blueprint
 
-    @staticmethod
-    def _free_name(base: str, registry: AgentRegistry) -> str:
-        if registry.get(base) is None:
+    def _free_name(self, base: str, registry: AgentRegistry) -> str:
+        taken = (
+            {name.lower() for name in self._taken_names()}
+            if self._taken_names is not None
+            else set()
+        )
+
+        def free(candidate: str) -> bool:
+            return registry.get(candidate) is None and candidate.lower() not in taken
+
+        if free(base):
             return base
         n = 2
         while True:
             candidate = f"{base[:37]}-{n}"
-            if registry.get(candidate) is None:
+            if free(candidate):
                 return candidate
             n += 1
 

@@ -19,7 +19,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from alfred.domain.schemas import Collections, Memory
+from alfred.domain.schemas import Collections, Memory, load_or_none
 from alfred.ports.clock import ClockPort
 from alfred.ports.store import StorePort
 
@@ -94,7 +94,8 @@ class MemoryService:
         docs = await self._store.query(
             Collections.MEMORIES, limit=limit, newest_first=True
         )
-        return [Memory.model_validate(_without_key(doc)) for doc in docs]
+        loaded = [load_or_none(Memory, doc, source=Collections.MEMORIES) for doc in docs]
+        return [memory for memory in loaded if memory is not None]
 
     async def forget(self, memory_id: str) -> bool:
         """Delete one memory by its id field. The owner's data, the owner's call."""
@@ -121,7 +122,8 @@ class MemoryService:
 
     async def _all(self) -> list[Memory]:
         docs = await self._store.query(Collections.MEMORIES)
-        return [Memory.model_validate(_without_key(doc)) for doc in docs]
+        loaded = [load_or_none(Memory, doc, source=Collections.MEMORIES) for doc in docs]
+        return [memory for memory in loaded if memory is not None]
 
 
 def _without_key(doc: dict[str, Any]) -> dict[str, Any]:

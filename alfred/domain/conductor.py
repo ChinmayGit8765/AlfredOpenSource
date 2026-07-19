@@ -22,7 +22,7 @@ from alfred.domain.schemas import (
     UserProfile,
 )
 from alfred.domain.structured import structured_call
-from alfred.errors import StructuredCallError
+from alfred.errors import AlfredError
 from alfred.ports.clock import ClockPort
 from alfred.ports.model import ModelPort
 
@@ -259,8 +259,12 @@ class Conductor:
                 system=_SYSTEM_PROMPT,
                 user=_render_user(plans, capacity, profile, conflicts),
             )
-        except StructuredCallError:
-            logger.warning("conductor: model produced no valid resolution")
+        except AlfredError as exc:
+            # StructuredCallError covers unusable output, but the model port
+            # itself can raise (connection reset, timeout mapped to
+            # AlfredError by the adapter); both must engage the fallback,
+            # never crash the week. The real cause stays diagnosable in logs.
+            logger.warning("conductor: model call failed (%s); engaging fallback", exc)
             return self._fallback(
                 plans, capacity, week_of, "model produced no valid resolution"
             )
@@ -275,9 +279,33 @@ class Conductor:
         duplicated = sorted(
             {i for i in proposed_ids if proposed_id_list.count(i) > 1}
         )
+        # The model controls week_of and day on its own output, so
+        # re-checking its grouping would let a dropped week_of split one
+        # over-capacity week into fragments that each pass. Re-check with
+        # the authoritative grouping: items keep their PROPOSED load, day,
+        # and time (moves are legitimate resolutions), but each item is
+        # counted in the week its ORIGINAL plan belonged to, and an item
+        # whose proposed day went missing or junk is re-checked on its
+        # original day so it cannot dodge the per-day cap.
+        origin_week: dict[str, date | None] = {}
+        origin_day: dict[str, str | None] = {}
+        for plan in plans:
+            for item in plan.items:
+                origin_week[item.id] = plan.week_of
+                origin_day[item.id] = _normalize_day(item.day)
+        recheck: dict[date | None, Plan] = {}
+        for plan in proposed.plans:
+            for item in plan.items:
+                if item.id not in origin_week:
+                    continue  # invented ids are fatal via the check above
+                copy = item.model_copy(deep=True)
+                if _normalize_day(copy.day) is None and origin_day[item.id]:
+                    copy.day = origin_day[item.id]
+                week = origin_week[item.id]
+                recheck.setdefault(week, Plan(week_of=week)).items.append(copy)
         remaining = [
             c
-            for c in detect_conflicts(proposed.plans, capacity)
+            for c in detect_conflicts(list(recheck.values()), capacity)
             if c.kind in _OVERLOAD_KINDS
         ]
         if invented or duplicated or remaining:

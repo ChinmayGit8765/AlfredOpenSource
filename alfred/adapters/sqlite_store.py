@@ -3,8 +3,9 @@
 One table of JSON documents keyed by (collection, key). The sync sqlite3
 driver runs inside asyncio.to_thread, serialized by an asyncio.Lock so the
 single shared connection is never touched concurrently. Where-filtering
-happens in Python on the loaded documents: collections are small and
-simple-and-correct beats clever SQL json_extract.
+happens in Python inside the worker thread, streamed in fetchmany batches:
+simple-and-correct beats clever SQL json_extract, while memory stays bounded
+and json decoding stays off the event loop.
 """
 
 from __future__ import annotations
@@ -137,25 +138,39 @@ class SqliteStoreAdapter:
         newest_first: bool = False,
     ) -> list[dict[str, Any]]:
         order = "DESC" if newest_first else "ASC"
+        sql = f"SELECT key, doc FROM documents WHERE collection = ? ORDER BY key {order}"
+        params: tuple[Any, ...] = (collection,)
+        # The LIMIT pushdown is only safe without a where filter, because the
+        # filter can reject rows and a SQL cap would starve it of candidates.
+        # Documented edge: a corrupt row inside the LIMIT window is skipped,
+        # not scanned past, so this fast path can return fewer than `limit`
+        # docs when the window holds garbage. Acceptable for tolerant reads.
+        if where is None and limit is not None:
+            sql += " LIMIT ?"
+            params = (collection, limit)
 
-        def work() -> list[tuple[str, str]]:
-            return self._conn.execute(
-                f"SELECT key, doc FROM documents WHERE collection = ? ORDER BY key {order}",
-                (collection,),
-            ).fetchall()
+        def work() -> list[dict[str, Any]]:
+            # Decode and filter here in the worker thread: fetchmany keeps
+            # memory bounded on large collections, json.loads stays off the
+            # event loop, and the early return stops the scan as soon as
+            # `limit` matches are in hand.
+            cursor = self._conn.execute(sql, params)
+            results: list[dict[str, Any]] = []
+            while True:
+                batch = cursor.fetchmany(200)
+                if not batch:
+                    return results
+                for key, raw in batch:
+                    doc = self._decode_doc(raw, key)
+                    if doc is None:
+                        continue  # one corrupt row never poisons the whole collection
+                    if where and any(doc.get(k) != v for k, v in where.items()):
+                        continue
+                    results.append(doc)
+                    if limit is not None and len(results) >= limit:
+                        return results
 
-        rows = await self._run(work)
-        results: list[dict[str, Any]] = []
-        for key, raw in rows:
-            doc = self._decode_doc(raw, key)
-            if doc is None:
-                continue  # one corrupt row never poisons the whole collection
-            if where and any(doc.get(k) != v for k, v in where.items()):
-                continue
-            results.append(doc)
-            if limit is not None and len(results) >= limit:
-                break
-        return results
+        return await self._run(work)
 
     async def close(self) -> None:
         await self._run(self._conn.close)

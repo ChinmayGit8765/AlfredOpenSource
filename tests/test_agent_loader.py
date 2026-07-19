@@ -141,7 +141,7 @@ def test_real_repo_agents_load() -> None:
     registry = load_agents(REPO_AGENTS_DIR)
 
     names = {a.manifest.name for a in registry.all()}
-    assert names == {"build", "study", "training"}
+    assert names == {"build", "qa", "scout", "study", "training"}
     for agent in registry.all():
         assert agent.prompt.strip()
         assert agent.manifest.allowed_tools

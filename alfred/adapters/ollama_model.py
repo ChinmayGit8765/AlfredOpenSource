@@ -13,6 +13,9 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+# httpx is already in the dependency tree via the ollama package itself,
+# the same stance the telegram adapter takes.
+import httpx
 import ollama
 
 from alfred.config import ModelConfig
@@ -20,6 +23,16 @@ from alfred.errors import AlfredError, ConfigError
 from alfred.ports.model import ModelMessage, ModelOptions
 
 logger = logging.getLogger(__name__)
+
+# The ollama package defaults timeout to None (infinite httpx timeouts).
+# The runtime serializes everything behind one handler lock, so a single
+# hung generation (machine sleep, GPU wedge, LAN host dying mid-response)
+# would deadlock the entire service, heartbeat and shutdown included.
+# 300s read rather than something tighter: chat() is non-streaming, so the
+# read timeout bounds cold model load plus the whole generation, and a
+# large local model on weak hardware can legitimately need minutes.
+_CONNECT_TIMEOUT_S = 8.0
+_READ_TIMEOUT_S = 300.0
 
 
 def _matches(wanted: str, available: str) -> bool:
@@ -37,12 +50,31 @@ class OllamaModelAdapter:
     def __init__(self, config: ModelConfig, *, client: object | None = None) -> None:
         self._config = config
         # client injection keeps tests offline; production builds the real one.
-        self._client: Any = client if client is not None else ollama.AsyncClient(host=config.host)
+        self._client: Any = (
+            client
+            if client is not None
+            else ollama.AsyncClient(
+                host=config.host,
+                timeout=httpx.Timeout(_READ_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S),
+            )
+        )
         # Set by ensure_model: the exact locally-available name that satisfied
         # the configured one. Chatting with a bare name like "qwen3" makes
         # Ollama resolve it to ":latest", which 404s when only a tagged
         # variant ("qwen3:8b") is pulled.
         self._resolved: str | None = None
+
+    def _timeout_error(self, exc: httpx.TimeoutException) -> AlfredError:
+        # A read timeout does not prove the server is down: it may be up
+        # with generation stalled, so the message must not suggest
+        # "is the server running?". Name the budget that actually expired.
+        budget = (
+            _CONNECT_TIMEOUT_S if isinstance(exc, httpx.ConnectTimeout) else _READ_TIMEOUT_S
+        )
+        return AlfredError(
+            f"timed out waiting for Ollama at {self._config.host} after "
+            f"{budget:.0f}s; the model may be overloaded or the connection lost"
+        )
 
     async def complete(
         self,
@@ -70,6 +102,8 @@ class OllamaModelAdapter:
 
         try:
             response = await self._client.chat(**kwargs)
+        except httpx.TimeoutException as exc:
+            raise self._timeout_error(exc) from exc
         except ConnectionError as exc:
             raise AlfredError(
                 f"could not reach Ollama at {self._config.host}; "
@@ -93,6 +127,8 @@ class OllamaModelAdapter:
         """
         try:
             listing = await self._client.list()
+        except httpx.TimeoutException as exc:
+            raise self._timeout_error(exc) from exc
         except ConnectionError as exc:
             raise AlfredError(
                 f"could not reach Ollama at {self._config.host}; "

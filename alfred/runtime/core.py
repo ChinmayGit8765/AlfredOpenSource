@@ -66,6 +66,7 @@ _HELP_TEXT = "\n".join(
         "- win: mark the next small win done (or 'win <text>' to log a side win)",
         "- wins: your recent wins, newest first",
         "- agents: list every known agent",
+        "- pending: list gated tool actions awaiting your confirmation",
         "- confirm <id> / deny <id>: rule on a gated tool action",
         "- proposals: list pending self-change proposals",
         "- approve <id> [confirm-safety] / reject <id>: rule on a proposal",
@@ -112,6 +113,7 @@ class AlfredCore:
         config: AlfredConfig,
         agents_dir: Path,
         memory: MemoryService | None = None,
+        skipped_agents: list[tuple[str, str]] | None = None,
     ) -> None:
         self._registry = registry
         self._executor = executor
@@ -130,6 +132,9 @@ class AlfredCore:
         self._config = config
         self._agents_dir = Path(agents_dir)
         self._memory = memory or MemoryService(store, clock)
+        # Folders that failed to load at startup: shown in 'agents' and
+        # 'status' so a version rollback can never silently unload agents.
+        self._skipped_agents = list(skipped_agents or [])
         # ALFRED serves one owner on one event loop, but every transport plus
         # the heartbeat run as concurrent tasks. This lock serializes every
         # inbound and scheduled handler so their read-modify-write cycles on
@@ -172,10 +177,19 @@ class AlfredCore:
         except Exception as exc:
             logger.exception("handle_inbound failed for message %s", message.id)
             try:
+                # AlfredError messages are owner-readable by construction
+                # (adapters keep keys and tokens out of error text; keep it
+                # that way when adding raise sites), so a remote owner gets
+                # the actual hint instead of a class name and a pointer at
+                # a log on a machine they may not be sitting at.
+                detail = (
+                    str(exc)
+                    if isinstance(exc, AlfredError) and str(exc)
+                    else f"{type(exc).__name__}; the details are in my log"
+                )
                 await self._send(
                     message.channel,
-                    "Sorry, something went wrong while handling that "
-                    f"({type(exc).__name__}). The details are in my log.",
+                    f"Sorry, something went wrong while handling that ({detail}).",
                 )
             except Exception:
                 logger.exception("failed to deliver the error notice")
@@ -221,6 +235,26 @@ class AlfredCore:
         result = await self._executor.run(agent, text=text, provenance="scheduler")
         if channel is not None:
             await self._deliver_result(channel, result)
+        else:
+            # No destination yet (no configured channel, owner not seen
+            # this process): a gated action would otherwise expire without
+            # the owner ever learning its id existed.
+            if result.pending:
+                logger.warning(
+                    "scheduled run for %s gated %d action(s) with no "
+                    "destination; ids: %s; say 'pending' on any channel to "
+                    "list them",
+                    agent.manifest.name,
+                    len(result.pending),
+                    [action.id for action in result.pending],
+                )
+            if result.replies:
+                logger.warning(
+                    "scheduled run for %s produced %d repl(y/ies) with no "
+                    "destination; dropped",
+                    agent.manifest.name,
+                    len(result.replies),
+                )
 
         # Staggered Monday planning runs still land in one coherent week:
         # once two or more agents have plans for the same week, the
@@ -317,26 +351,63 @@ class AlfredCore:
         if lowered == "proposals":
             await self._send(channel, await self._render_proposals())
             return True
+        if lowered == "pending":
+            await self._send(channel, await self._render_pending())
+            return True
         if lowered == "reflect":
             reflection = await self._reflection.reflect(
                 self._registry, self._config.heartbeat.reflection_days
             )
             await self._send(channel, self._render_reflection(reflection))
             return True
-        if head == "confirm" and len(parts) == 2:
-            await self._confirm_action(channel, parts[1])
+        # Governance heads are intercepted even at the wrong arity: a
+        # mistyped 'confirm' or 'approve <id> confirm safety' silently
+        # feeding an open builder session (or the generic fallback) is how
+        # a gated action quietly never runs. Only these heads are reserved;
+        # remember/recall/forget stay loose because 'forget it' is a
+        # builder cancel phrase and multi-word forms are natural language.
+        if head == "confirm":
+            if len(parts) == 2:
+                await self._confirm_action(channel, parts[1])
+            else:
+                await self._send(
+                    channel,
+                    "Usage: confirm <id>. Say 'pending' to see the ids "
+                    "waiting on you.",
+                )
             return True
-        if head == "deny" and len(parts) == 2:
-            await self._deny_action(channel, parts[1])
+        if head == "deny":
+            if len(parts) == 2:
+                await self._deny_action(channel, parts[1])
+            else:
+                await self._send(
+                    channel,
+                    "Usage: deny <id>. Say 'pending' to see the ids waiting on you.",
+                )
             return True
-        if head == "approve" and len(parts) in (2, 3):
-            confirm_safety = len(parts) == 3 and parts[2].lower() == "confirm-safety"
-            if len(parts) == 3 and not confirm_safety:
-                return False  # unknown trailing word; not this command
-            await self._approve_proposal(channel, parts[1], confirm_safety)
+        if head == "approve":
+            tail = " ".join(parts[2:]).lower()
+            # The space variant is the typo the safety prompt itself
+            # invites; accepting it keeps the deliberate two-word phrase
+            # while removing the trap.
+            confirm_safety = tail in ("confirm-safety", "confirm safety")
+            if len(parts) >= 2 and (not tail or confirm_safety):
+                await self._approve_proposal(channel, parts[1], confirm_safety)
+            else:
+                await self._send(
+                    channel,
+                    "Usage: approve <id>, or approve <id> confirm-safety for "
+                    "a proposal that touches safety settings.",
+                )
             return True
-        if head == "reject" and len(parts) == 2:
-            await self._reject_proposal(channel, parts[1])
+        if head == "reject":
+            if len(parts) == 2:
+                await self._reject_proposal(channel, parts[1])
+            else:
+                await self._send(
+                    channel,
+                    "Usage: reject <id>. Say 'proposals' to see what is pending.",
+                )
             return True
 
         if head == "remember" and len(parts) >= 2:
@@ -370,6 +441,13 @@ class AlfredCore:
             context = await self._memory.context_for(goal_text)
             roadmap = await self._roadmap.set_goal(goal_text, context=context)
             await self._send(channel, self._render_new_roadmap(roadmap))
+            return True
+        if lowered == "goal":
+            await self._send(
+                channel,
+                "Usage: goal <something you want>. I will lay a path of "
+                "small wins toward it.",
+            )
             return True
         if lowered == "roadmap":
             await self._send(channel, await self._render_roadmap())
@@ -698,7 +776,9 @@ class AlfredCore:
                 )
             try:
                 path = materialise_agent(self._agents_dir, blueprint)
-            except AlfredError as exc:
+            except (AlfredError, OSError) as exc:
+                # OSError too: a locked file or full disk must strand the
+                # approval honestly, never escape as a generic crash.
                 return f"Approved, but I could not write the agent folder: {exc}"
             self._registry.add(
                 LoadedAgent(
@@ -728,10 +808,23 @@ class AlfredCore:
             old_state = agent.manifest.lifecycle.value
             agent.manifest.lifecycle = new_state
             on_disk = self._write_manifest(agent)
+            if on_disk == "failed":
+                # Memory must match disk: a half-applied lifecycle would
+                # silently revert on the next restart, so undo and say so.
+                agent.manifest.lifecycle = Lifecycle(old_state)
+                return (
+                    "Approved, but I could not write the manifest to disk; "
+                    "nothing changed. The approval is on record for applying "
+                    "by hand."
+                )
             await self._record_application(proposal, old=old_state)
             return (
                 f"'{proposal.agent}' is now {new_state.value} (was {old_state})"
-                + ("." if on_disk else " (in memory only; its folder is missing on disk).")
+                + (
+                    "."
+                    if on_disk == "ok"
+                    else " (in memory only; its folder is missing on disk)."
+                )
             )
 
         if proposal.kind is ProposalKind.PROMPT_CHANGE:
@@ -739,15 +832,27 @@ class AlfredCore:
             if agent is None or proposal.new is None:
                 return by_hand
             old_prompt = agent.prompt
-            agent.prompt = proposal.new
             folder = self._agent_folder(agent)
-            await self._record_application(proposal, old=old_prompt)
             if folder.is_dir():
-                (folder / "agent.md").write_text(proposal.new, encoding="utf-8")
+                try:
+                    # Disk before memory: a failed write must leave the old
+                    # prompt live everywhere, or a restart silently reverts
+                    # an approval the owner believes landed.
+                    (folder / "agent.md").write_text(proposal.new, encoding="utf-8")
+                except OSError as exc:
+                    return (
+                        f"Approved, but I could not write agent.md ({exc}); "
+                        "nothing changed. The approval is on record for "
+                        "applying by hand."
+                    )
+                agent.prompt = proposal.new
+                await self._record_application(proposal, old=old_prompt)
                 return (
                     f"'{proposal.agent}' has its new prompt. The previous one "
                     "is kept on the proposal record."
                 )
+            agent.prompt = proposal.new
+            await self._record_application(proposal, old=old_prompt)
             return (
                 f"'{proposal.agent}' has its new prompt in memory only; "
                 "its folder is missing on disk."
@@ -760,12 +865,19 @@ class AlfredCore:
             old_state = agent.manifest.lifecycle.value
             agent.manifest.lifecycle = Lifecycle.RETIRED
             on_disk = self._write_manifest(agent)
+            if on_disk == "failed":
+                agent.manifest.lifecycle = Lifecycle(old_state)
+                return (
+                    "Approved, but I could not write the manifest to disk; "
+                    "nothing changed. The approval is on record for applying "
+                    "by hand."
+                )
             await self._record_application(proposal, old=old_state)
             return (
                 f"'{proposal.agent}' is retired, with thanks for the data it gave"
                 + (
                     "."
-                    if on_disk
+                    if on_disk == "ok"
                     else " (in memory only; its folder is missing on disk)."
                 )
             )
@@ -792,18 +904,31 @@ class AlfredCore:
     def _agent_folder(self, agent: LoadedAgent) -> Path:
         return Path(agent.path) if agent.path else self._agents_dir / agent.manifest.name
 
-    def _write_manifest(self, agent: LoadedAgent) -> bool:
+    def _write_manifest(self, agent: LoadedAgent) -> str:
+        """Persist the manifest; returns "ok", "missing", or "failed".
+
+        "missing" (no folder) keeps the in-memory change: a folderless
+        agent is a known degraded mode. "failed" (write error) tells the
+        caller to revert, because memory diverging from an EXISTING folder
+        silently undoes the change on the next restart.
+        """
         folder = self._agent_folder(agent)
         if not folder.is_dir():
             logger.warning(
                 "agent folder missing on disk, manifest change kept in memory: %s",
                 folder,
             )
-            return False
-        (folder / "manifest.yaml").write_text(
-            render_manifest_yaml(agent.manifest), encoding="utf-8"
-        )
-        return True
+            return "missing"
+        try:
+            (folder / "manifest.yaml").write_text(
+                render_manifest_yaml(agent.manifest), encoding="utf-8"
+            )
+        except OSError:
+            logger.exception(
+                "failed to write manifest for %s", agent.manifest.name
+            )
+            return "failed"
+        return "ok"
 
     # --- builder continuation ---------------------------------------------
 
@@ -819,9 +944,16 @@ class AlfredCore:
             blueprint = updated.blueprint
             try:
                 path = materialise_agent(self._agents_dir, blueprint)
-            except AlfredError as exc:
+            except (AlfredError, OSError) as exc:
+                # The approval marked the session DONE before this write;
+                # reopen it so the elicited lever and blueprint survive and
+                # the owner can rename or retry instead of starting over.
+                await self._builder.reopen(updated.id)
                 await self._send(
-                    message.channel, f"I could not write the agent folder: {exc}"
+                    message.channel,
+                    f"I could not write the agent folder: {exc}. The build "
+                    "is still open: rename it (e.g. 'call it something-else') "
+                    "and approve again, or say 'cancel' to drop it.",
                 )
                 return True
             self._registry.add(
@@ -904,7 +1036,15 @@ class AlfredCore:
             await self._send(channel, "\n".join(lines))
 
     async def _latest_plan(self, agent_name: str) -> Plan | None:
-        docs = await self._store.query(Collections.PLANS, where={"agent": agent_name})
+        # Newest window only: append keys are chronological, so the latest
+        # plan lives in the most recent rows and a year of history must not
+        # be decoded on every short outcome message.
+        docs = await self._store.query(
+            Collections.PLANS,
+            where={"agent": agent_name},
+            limit=50,
+            newest_first=True,
+        )
         plans: list[Plan] = []
         for doc in docs:
             data = {k: v for k, v in doc.items() if k != "_key"}
@@ -917,7 +1057,7 @@ class AlfredCore:
         dated = [p for p in plans if p.created_at is not None]
         if dated:
             return max(dated, key=lambda p: p.created_at or datetime.min)
-        return plans[-1]
+        return plans[0]
 
     # --- rendering ------------------------------------------------------------
 
@@ -966,6 +1106,12 @@ class AlfredCore:
                 )
         else:
             lines.append("No active agents.")
+        if self._skipped_agents:
+            names = ", ".join(name for name, _ in self._skipped_agents)
+            lines.append(
+                f"Not loaded (folder failed to parse): {names}. "
+                "Say 'agents' for the reasons."
+            )
         roadmap = await self._roadmap.current()
         if roadmap is not None and roadmap.next_win is not None:
             lines.append(
@@ -975,18 +1121,37 @@ class AlfredCore:
         lines.append(
             f"Pending actions: {len(actions)}. Pending proposals: {len(proposals)}."
         )
+        if actions:
+            lines.append("Say 'pending' to list the actions waiting on you.")
         return "\n".join(lines)
 
     def _render_agents(self) -> str:
         agents = self._registry.all()
-        if not agents:
+        if not agents and not self._skipped_agents:
             return "No agents loaded. Say 'new agent <goal>' to build one."
-        lines = ["Known agents:"]
+        lines = ["Known agents:"] if agents else []
         for agent in agents:
             lines.append(
                 f"- {agent.manifest.name} ({agent.manifest.lifecycle.value}): "
                 f"{agent.manifest.description}"
             )
+        for name, reason in self._skipped_agents:
+            lines.append(f"- {name}: NOT LOADED ({reason})")
+        return "\n".join(lines)
+
+    async def _render_pending(self) -> str:
+        # Rendered via list_pending() on purpose: it expires stale actions
+        # on read, so nothing expired can resurface as confirmable.
+        actions = await self._pending.list_pending()
+        if not actions:
+            return "No pending actions."
+        lines = ["Actions awaiting your confirmation:"]
+        for action in actions:
+            reason = action.reason or "no reason given"
+            lines.append(
+                f"- {action.id}: {action.call.tool} by {action.agent} ({reason})"
+            )
+        lines.append("Say 'confirm <id>' to execute one, or 'deny <id>' to reject it.")
         return "\n".join(lines)
 
     async def _render_proposals(self) -> str:
@@ -1050,7 +1215,18 @@ class AlfredCore:
         sends into a transport that cannot deliver them.
         """
         if self._config.discord.channel_id:
-            return f"discord:{self._config.discord.channel_id}"
+            # Duck-typed on purpose: TransportPort is a frozen surface, so
+            # route-awareness stays optional. When the transport can say
+            # the Discord route is absent (token unset, adapter off), a
+            # stale channel_id in config must not blackhole every check-in
+            # while the owner chats happily on Telegram.
+            has_route = getattr(self._transport, "has_route", None)
+            if has_route is None or has_route("discord"):
+                return f"discord:{self._config.discord.channel_id}"
+            logger.warning(
+                "discord.channel_id is set but the Discord transport is not "
+                "running; falling back to the owner's latest channel"
+            )
         return self._last_channel
 
     async def _send_scheduled(self, channel: str | None, text: str) -> None:

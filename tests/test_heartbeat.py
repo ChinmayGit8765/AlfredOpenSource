@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from alfred.config import HeartbeatConfig
 from alfred.domain.registry import AgentRegistry, LoadedAgent
@@ -331,8 +331,152 @@ async def test_crashing_runner_does_not_block_others_or_hot_loop() -> None:
 
     fired = await heartbeat.tick()
     assert any(t.agent == "good" for t in runner.calls)  # ran despite the crash
-    assert any(t.agent == "bad" for t in fired)  # attempted and reported
+    # fired reports what RAN; the crasher is retried later, not reported.
+    assert all(t.agent != "bad" for t in fired)
     assert await store.get(Collections.HEARTBEAT, "schedule:bad") is not None
 
-    # Same instant: the crasher's last-run advanced, so nothing refires.
+    # Same instant: the crasher is inside its backoff window, nothing refires.
     assert await heartbeat.tick() == []
+
+
+async def test_transient_failure_retries_after_backoff_then_succeeds_once() -> None:
+    clock = FakeClock(MONDAY)
+
+    class FailsOnce(RecordingRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        async def __call__(self, trigger: ScheduledTrigger) -> None:
+            if trigger.reason == "schedule" and not self.failed:
+                self.failed = True
+                raise RuntimeError("model still booting")
+            await super().__call__(trigger)
+
+    runner = FailsOnce()
+    heartbeat, _, _ = build(
+        [agent("training", kind="interval", every_minutes=240)],
+        clock=clock,
+        runner=runner,
+        tick_seconds=60,
+    )
+
+    fired = await heartbeat.tick()
+    assert all(t.reason != "schedule" for t in fired)  # first attempt failed
+    clock.advance(minutes=2)  # past the first backoff (one tick)
+    fired = await heartbeat.tick()
+    assert [t.agent for t in fired if t.reason == "schedule"] == ["training"]
+    assert len(schedule_calls(runner, "training")) == 1
+
+    # The retried occurrence is consumed: no double fire afterwards.
+    clock.advance(minutes=2)
+    assert await heartbeat.tick() == []
+
+
+async def test_repeated_failure_abandons_occurrence_at_cap() -> None:
+    clock = FakeClock(MONDAY)
+    runner = FlakyRunner()
+    heartbeat, store, _ = build(
+        [agent("bad", kind="interval", every_minutes=60)],
+        clock=clock,
+        runner=runner,
+        tick_seconds=60,
+    )
+
+    for _ in range(3):  # cap is 3 attempts per occurrence
+        await heartbeat.tick()
+        clock.advance(minutes=10)
+
+    doc = await store.get(Collections.HEARTBEAT, "schedule:bad")
+    assert doc is not None and "last" in doc  # abandoned: last advanced
+    # Within the interval nothing refires; the failure spiral is over.
+    assert await heartbeat.tick() == []
+
+
+async def test_store_put_failure_does_not_refire_or_abort_tick() -> None:
+    clock = FakeClock(MONDAY)
+
+    class HeartbeatWriteFails(MemoryStore):
+        async def put(self, collection: str, key: str, doc: dict) -> None:
+            if collection == Collections.HEARTBEAT:
+                raise RuntimeError("disk full")
+            await super().put(collection, key, doc)
+
+    store = HeartbeatWriteFails()
+    heartbeat, _, runner = build(
+        [
+            agent("alpha", kind="interval", every_minutes=60),
+            agent("beta", kind="interval", every_minutes=60),
+        ],
+        clock=clock,
+        store=store,
+    )
+
+    fired = await heartbeat.tick()
+    # Both jobs ran despite the store failing to persist their last-run.
+    assert {t.agent for t in fired if t.reason == "schedule"} == {"alpha", "beta"}
+    # Same process: the in-memory bridge suppresses a duplicate fire.
+    assert await heartbeat.tick() == []
+    assert len([t for t in runner.calls if t.reason == "schedule"]) == 2
+
+
+async def test_catchup_fires_in_scheduled_time_order_not_alphabetical() -> None:
+    # zulu plans at 08:00, alpha audits at 09:30: alphabetical order would
+    # run the auditor before the planner on a cold 10:00 start.
+    clock = FakeClock(MONDAY.replace(hour=10, minute=0))
+    heartbeat, _, runner = build(
+        [
+            agent("alpha", kind="weekly", days=["mon"], time="09:30"),
+            agent("zulu", kind="weekly", days=["mon"], time="08:00"),
+        ],
+        clock=clock,
+    )
+
+    await heartbeat.tick()
+    scheduled = [t.agent for t in runner.calls if t.reason == "schedule"]
+    assert scheduled == ["zulu", "alpha"]
+
+
+async def test_cold_start_check_ins_fire_after_caught_up_schedules() -> None:
+    clock = FakeClock(MONDAY.replace(hour=10, minute=0))
+    heartbeat, _, runner = build(
+        [agent("alpha", lifecycle=Lifecycle.FORMING, kind="weekly", days=["mon"], time="08:00")],
+        clock=clock,
+    )
+
+    await heartbeat.tick()
+    reasons = [t.reason for t in runner.calls if t.agent == "alpha"]
+    assert reasons == ["schedule", "check_in"]
+
+
+async def test_retention_sweep_prunes_old_logs_and_spares_recent() -> None:
+    clock = FakeClock(MONDAY)
+    store = MemoryStore()
+    old = (MONDAY - timedelta(days=120)).isoformat()
+    await store.append(Collections.MESSAGES, {"text": "ancient", "at": old})
+    await store.append(Collections.AUDIT, {"event": "ancient", "at": old})
+    await store.append(
+        Collections.MESSAGES, {"text": "fresh", "at": MONDAY.isoformat()}
+    )
+    await store.append(Collections.AUDIT, {"event": "undated"})
+
+    heartbeat, _, _ = build([], clock=clock, store=store, retention_days=90)
+    await heartbeat.tick()
+
+    messages = await store.query(Collections.MESSAGES)
+    audit = await store.query(Collections.AUDIT)
+    assert [m["text"] for m in messages] == ["fresh"]
+    # Undated rows are never deleted; only the dated ancient row went.
+    assert [a["event"] for a in audit] == ["undated"]
+
+
+async def test_retention_disabled_by_default_keeps_everything() -> None:
+    clock = FakeClock(MONDAY)
+    store = MemoryStore()
+    ancient = (MONDAY.replace(year=2020)).isoformat()
+    await store.append(Collections.AUDIT, {"event": "ancient", "at": ancient})
+
+    heartbeat, _, _ = build([], clock=clock, store=store)
+    await heartbeat.tick()
+
+    assert len(await store.query(Collections.AUDIT)) == 1

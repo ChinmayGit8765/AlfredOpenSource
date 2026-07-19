@@ -427,7 +427,9 @@ async def test_executor_failure_surfaces_apology(tmp_path: Path) -> None:
 
     texts = sent_texts(world)
     assert len(texts) == 1
-    assert "StructuredCallError" in texts[0]
+    # AlfredError messages are owner-readable, so the owner gets the actual
+    # validation hint rather than a class name pointing at a log.
+    assert "AgentReply validation" in texts[0]
     assert "Traceback" not in texts[0]
 
 

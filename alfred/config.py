@@ -106,6 +106,11 @@ class HeartbeatConfig(BaseModel):
     # 0 disables it; the nudge only ever sends when a next win actually exists,
     # and never during quiet hours. A surface, never a streak or a nag.
     roadmap_nudge_days: int = Field(default=1, ge=0)
+    # Age in days after which the message and audit LOGS are pruned by a
+    # daily sweep. 0 (the default) keeps everything forever: deleting audit
+    # history is an owner decision, never a silent adapter default. Pending
+    # actions, proposals, plans, and memories are never swept regardless.
+    retention_days: int = Field(default=0, ge=0)
 
 
 class PolicyConfig(BaseModel):

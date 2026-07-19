@@ -20,6 +20,7 @@ from alfred.domain.schemas import (
     ProposalKind,
     Provenance,
     ToolCall,
+    load_or_none,
 )
 from alfred.errors import AlfredError
 from alfred.ports.clock import ClockPort
@@ -115,7 +116,13 @@ class PendingActions:
         )
         fresh: list[PendingAction] = []
         for doc in docs:
-            action = PendingAction.model_validate(_strip_key(doc))
+            # A drifted legacy row must not block the list: hiding every
+            # confirmable action behind one unreadable one would wedge the
+            # whole confirm flow. Skipped rows are warned about, and
+            # unconfirmed actions can never execute, so skipping is safe.
+            action = load_or_none(PendingAction, doc, source=Collections.PENDING_ACTIONS)
+            if action is None:
+                continue
             if self._is_stale(action):
                 await self._expire(action)
                 continue
@@ -152,6 +159,31 @@ class PendingActions:
             approved=approved,
         )
         return resolved
+
+    async def reopen(self, action_id: str) -> PendingAction:
+        """Return a confirmed-but-unexecuted action to pending.
+
+        Used when execution failed after approval (tool vanished, server
+        down): the confirmation was consumed but nothing ran, so the owner
+        must be able to confirm again once the fault is fixed. The TTL
+        still counts from the original created_at, so a reopened action
+        for a long-broken tool expires normally instead of living forever.
+        """
+        action = await self.get(action_id)
+        if action is None:
+            raise AlfredError(f"unknown pending action: {action_id}")
+        reopened = action.model_copy(update={"status": "pending"})
+        await self._save(reopened)
+        await audit(
+            self._store,
+            self._clock,
+            "pending_action_reopened",
+            action_id=reopened.id,
+            agent=reopened.agent,
+            tool=reopened.call.tool,
+            tier=reopened.tier.value,
+        )
+        return reopened
 
     def _is_stale(self, action: PendingAction) -> bool:
         if action.created_at is None:
@@ -217,7 +249,10 @@ class Proposals:
         docs = await self._store.query(
             Collections.PROPOSALS, where={"status": "pending"}
         )
-        return [Proposal.model_validate(_strip_key(doc)) for doc in docs]
+        loaded = [
+            load_or_none(Proposal, doc, source=Collections.PROPOSALS) for doc in docs
+        ]
+        return [proposal for proposal in loaded if proposal is not None]
 
     async def resolve(self, proposal_id: str, *, approved: bool) -> Proposal:
         doc = await self._store.get(Collections.PROPOSALS, proposal_id)

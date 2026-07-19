@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from alfred.domain.schemas import Collections, Milestone, Roadmap, Win
+from alfred.domain.schemas import Collections, Milestone, Roadmap, Win, load_or_none
 from alfred.domain.structured import structured_call
 from alfred.ports import ClockPort, ModelPort, StorePort
 
@@ -112,7 +112,8 @@ class WinsLedger:
         docs = await self._store.query(
             Collections.WINS, limit=limit, newest_first=True
         )
-        return [Win.model_validate(_without_key(doc)) for doc in docs]
+        loaded = [load_or_none(Win, doc, source=Collections.WINS) for doc in docs]
+        return [win for win in loaded if win is not None]
 
 
 class RoadmapService:
@@ -144,7 +145,21 @@ class RoadmapService:
         doc = await self._store.get(Collections.ROADMAPS, _CURRENT_KEY)
         if doc is None:
             return None
-        return Roadmap.model_validate(_without_key(doc))
+        roadmap = load_or_none(Roadmap, doc, source=Collections.ROADMAPS)
+        if roadmap is None:
+            # set_goal overwrites the current key, so silently returning
+            # None over a drifted roadmap would let the next goal destroy
+            # the only copy of the owner's path. Quarantine it first.
+            await self._store.put(
+                Collections.ROADMAPS,
+                f"unreadable-{self._clock.now().isoformat()}",
+                _without_key(doc),
+            )
+            logger.error(
+                "stored roadmap no longer validates; quarantined a copy, "
+                "treating the goal as unset"
+            )
+        return roadmap
 
     async def set_goal(
         self, goal: str, *, real_lever: str = "", context: str = ""

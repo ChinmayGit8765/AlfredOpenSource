@@ -59,11 +59,13 @@ def adherence_signal(stats: AdherenceStats) -> str:
 
     Binding rule: one miss after successes still reads "strong" or "ok" by
     rate. One miss is fine; the second consecutive miss is the signal.
-    No data is not a problem, so an empty record reads "ok".
+    No engagement data is not a problem, so it reads "ok": a record of
+    only deliberate skips carries no follow-through signal at all, and a
+    skip must never read as a lapse.
     """
     if stats.consecutive_misses >= 2:
         return "lapsing"
-    if stats.total == 0:
+    if stats.engaged == 0:
         return "ok"
     if stats.rate >= 0.8:
         return "strong"

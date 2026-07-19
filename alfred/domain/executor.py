@@ -111,6 +111,7 @@ class AgentExecutor:
         current_user = text
         rounds_used = 0
         tool_call_count = 0
+        plan_dropped = False
         done = False
 
         for _ in range(max_rounds):
@@ -127,14 +128,41 @@ class AgentExecutor:
             if reply.reply.strip():
                 result.replies.append(reply.reply)
 
-            for note in reply.observations:
-                await self._user_model.record_observation(
-                    source=name, kind="insight", text=note
+            if reply.observations and provenance == "external":
+                # Untrusted content must never write into the shared owner
+                # model: a persisted observation re-enters every agent's
+                # system prompt with owner authority and feeds reflection,
+                # which makes it a durable prompt-injection channel.
+                # Dropped and audited, never stored.
+                await audit(
+                    self._store,
+                    self._clock,
+                    "observations_dropped",
+                    agent=name,
+                    provenance=provenance,
+                    count=len(reply.observations),
                 )
-                result.observations.append(note)
+            else:
+                for note in reply.observations:
+                    await self._user_model.record_observation(
+                        source=name, kind="insight", text=note
+                    )
+                    result.observations.append(note)
 
             if reply.plan is not None:
-                result.plan = self._stamp_plan(reply.plan, name)
+                if agent.manifest.emits_plans:
+                    result.plan = self._stamp_plan(reply.plan, name)
+                else:
+                    # Scheduled runs hand every agent a planning prompt, so
+                    # a meta agent will sometimes obey the text over its own
+                    # rules; the flag, not the prompt, is what keeps its
+                    # plan out of the store, the Conductor, and the peer
+                    # digests.
+                    plan_dropped = True
+                    logger.warning(
+                        "agent %s emitted a plan but emits_plans is false; dropped",
+                        name,
+                    )
 
             conversation.append(ModelMessage(role="user", content=current_user))
             conversation.append(
@@ -177,6 +205,8 @@ class AgentExecutor:
         }
         if result.plan is not None:
             audit_data["plan_id"] = result.plan.id
+        if plan_dropped:
+            audit_data["plan_dropped"] = True
         await audit(self._store, self._clock, "agent_run", **audit_data)
 
         logger.info(
