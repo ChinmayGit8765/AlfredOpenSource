@@ -1,0 +1,41 @@
+name: scout
+description: >-
+  Suggests how ALFRED itself could serve the owner better: goals that keep
+  appearing with no agent behind them, existing agents worth tuning, and
+  MCP connectors that would expand what the system can reach. Suggestion
+  only: it proposes in plain language and changes nothing itself.
+version: 1
+domain: meta
+lifecycle: established
+triggers:
+  keywords:
+    - suggest
+    - suggestion
+    - suggestions
+    - improve
+    - improvement
+    - idea
+    - ideas
+    - expand
+    - capability
+    - capabilities
+    - connector
+    - mcp
+    - upgrade
+  always: false
+schedule:
+  kind: weekly
+  days: [fri]
+  time: "16:30"
+allowed_tools:
+  - current_time
+  - list_agents_state
+  - list_plans
+  - list_recent_outcomes
+  - recall_memories
+  - log_note
+  - remember_fact
+capacity_cost: 0
+# The executor discards any plan this agent emits: suggestions live in
+# reply text, never in scheduled items, whatever the planning prompt says.
+emits_plans: false

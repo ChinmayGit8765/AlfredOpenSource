@@ -43,7 +43,8 @@ loudly instead of silently granting nothing.
 | `schedule.every_minutes` | int or null | no | For `interval`: fire when at least this many minutes have passed since the last run. |
 | `allowed_tools` | list[str] | no ([]) | The security allowlist. The agent may invoke only tools named here; everything else is refused and audited. Deny by default: an empty list means no tools at all. MCP tools use their namespaced name (`<server>.<tool>`). |
 | `capacity_cost` | int 0..20 | no (0) | Weekly capacity points this agent's plans claim, out of the profile's `weekly_capacity` (default 20). The builder uses the sum across active agents in its capacity check. |
-| `model` | object or null | no | Per-agent generation overrides: `model`, `temperature`, `max_tokens`. Null means the configured defaults. |
+| `emits_plans` | bool | no (true) | When false, the executor discards any plan the model emits (logged and audited, never persisted). Set it false for meta agents so a reviewer can never join the week it reviews. |
+| `model` | object or null | no | Per-agent generation overrides: `model`, `temperature`, `max_tokens`. Null means the configured defaults. The named model must exist on the one configured backend; see docs/MODELS.md. |
 
 A minimal working manifest:
 
@@ -71,7 +72,7 @@ The prompt is the whole personality and rulebook of the agent. At run time
 it is wrapped with the governance preamble, the user-model summary, an
 adherence hint when follow-through is slipping, the specs of the
 allowlisted tools, and the structured output contract; you write only the
-agent-specific part. The three shipped agents (`agents/training`,
+agent-specific part. The three shipped domain agents (`agents/training`,
 `agents/study`, `agents/build`) are the reference. What they have in
 common, distilled:
 
@@ -100,6 +101,28 @@ common, distilled:
   the only response to a miss is a smaller plan.
 - **Closing the loop.** Ask for outcomes in plain language, one item at a
   time, and take "done", "skipped it", "half of it" at face value.
+
+## Meta agents: qa and scout
+
+Two shipped agents work on ALFRED's output rather than the owner's life,
+and they follow a stricter contract than the domain agents:
+
+- **`agents/qa`** double-checks the week the other agents produced: anchors
+  on every item, honest loads against capacity, named deadlines with work
+  actually scheduled against them, collisions, constraint violations, and
+  adherence drift. It runs Monday morning after the planning runs, and on
+  demand ("check", "verify", "audit", "double check").
+- **`agents/scout`** is the suggestion and expandability agent: coverage
+  gaps worth a `new agent <goal>`, existing agents worth tuning, and MCP
+  connectors worth wiring (it points at `config/mcp.example.yaml`). It
+  suggests in plain language and changes nothing itself.
+
+The meta-agent contract, if you write your own: `capacity_cost: 0` (they
+ask nothing of the owner's week), `emits_plans: false` (the executor then
+discards any plan the model emits, so a meta agent can never join
+Conductor reconciliation or pollute the week it is meant to watch, however
+the scheduled planning prompt is phrased), and read-mostly allowlists
+(`log_note` / `remember_fact` at most).
 
 ## How the builder creates agents
 

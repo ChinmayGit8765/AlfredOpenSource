@@ -1010,6 +1010,8 @@ async def test_build_system_fake_smoke(tmp_path: Path) -> None:
 
     assert {a.manifest.name for a in system.registry.all()} == {
         "build",
+        "qa",
+        "scout",
         "study",
         "training",
     }

@@ -1,0 +1,36 @@
+name: qa
+description: >-
+  Double-checks the rest of the fleet. Audits the current week's plans for
+  honesty (anchors, realistic loads, concrete details), checks total load
+  against the owner's capacity, verifies named deadlines have work
+  scheduled against them, and reports drift plainly. Read-only by design:
+  it flags, it never fixes.
+version: 1
+domain: meta
+lifecycle: established
+triggers:
+  keywords:
+    # "check" also covers "double check" and "double-check": keyword
+    # matching is word-boundary based, so the shorter word matches inside
+    # both phrasings.
+    - qa
+    - check
+    - verify
+    - audit
+    - sanity
+  always: false
+schedule:
+  kind: weekly
+  days: [mon]
+  time: "09:30"
+allowed_tools:
+  - current_time
+  - list_plans
+  - list_recent_outcomes
+  - list_agents_state
+  - recall_memories
+  - log_note
+capacity_cost: 0
+# The executor discards any plan this agent emits: a reviewer never joins
+# the week it reviews, whatever the scheduled planning prompt asks for.
+emits_plans: false
