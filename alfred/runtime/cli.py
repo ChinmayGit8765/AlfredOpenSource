@@ -54,6 +54,18 @@ _OLLAMA_HINT = (
     "--fake where supported."
 )
 
+
+def _model_hint(config: AlfredConfig) -> str:
+    """The right unblock hint for the configured model provider."""
+    if config.llm.provider == "openai":
+        return (
+            f"ALFRED could not use the API endpoint at {config.llm.host}. "
+            f"Check llm.host and llm.name in the config, and that "
+            f"{config.llm.api_key_env} is exported if the provider needs a "
+            "key. Or try things offline with --fake where supported."
+        )
+    return _OLLAMA_HINT
+
 _DEFAULT_CONFIG = """\
 # ALFRED configuration. See config/alfred.example.yaml for every option
 # with documentation; only the essentials are listed here.
@@ -115,10 +127,17 @@ class _StdinReader:
         return await self._lines.get()
 
 
-async def _probe_ollama(config: AlfredConfig) -> str:
+async def _probe_model(config: AlfredConfig) -> str:
     """Return a usable model name or raise; bounded so init never hangs."""
     adapter = build_model(config)
-    return await asyncio.wait_for(adapter.ensure_model(), timeout=_OLLAMA_PROBE_TIMEOUT)
+    try:
+        return await asyncio.wait_for(
+            adapter.ensure_model(), timeout=_OLLAMA_PROBE_TIMEOUT
+        )
+    finally:
+        # The probe adapter is throwaway; close it so an httpx client
+        # never leaks. Ollama's adapter has no close and is skipped.
+        await _close_quietly(adapter)
 
 
 async def _close_quietly(obj: object) -> None:
@@ -134,6 +153,7 @@ async def _close_quietly(obj: object) -> None:
 async def _shutdown(system: ComposedSystem) -> None:
     if system.mcp_slot is not None and system.mcp_slot.inner is not None:
         await _close_quietly(system.mcp_slot.inner)
+    await _close_quietly(system.model)
     await _close_quietly(system.store)
 
 
@@ -155,19 +175,24 @@ async def _cmd_init(config_path: str | None) -> int:
     console.print(ui.check_line("ok", "data dir", str(config.data_dir)))
 
     try:
-        chosen = await _probe_ollama(config)
+        chosen = await _probe_model(config)
     except Exception as exc:
+        hint = (
+            "Start Ollama and pull a model (ollama pull qwen3:8b), or try "
+            "chat --fake offline."
+            if config.llm.provider == "ollama"
+            else f"Check llm.host and {config.llm.api_key_env}, or try "
+            "chat --fake offline."
+        )
         console.print(
             ui.check_line(
                 "warn",
-                "ollama",
-                f"not reachable ({type(exc).__name__}); chat and run need it. "
-                "Start Ollama and pull a model (ollama pull qwen3:8b), or try "
-                "chat --fake offline.",
+                "model",
+                f"not reachable ({type(exc).__name__}); chat and run need it. {hint}",
             )
         )
     else:
-        console.print(ui.check_line("ok", "ollama", f"reachable, model: {chosen}"))
+        console.print(ui.check_line("ok", "model", f"reachable, model: {chosen}"))
     console.print(
         "\n[chrome]Next:[/] alfred chat --fake [chrome](offline demo) or[/] "
         "alfred doctor [chrome](full readiness check)[/]"
@@ -179,6 +204,18 @@ async def _cmd_chat(fake: bool, config_path: str | None) -> int:
     config = load_config(config_path)
     system = build_system(config, fake=fake, transport=LoopbackTransport())
     if not fake:
+        # Probe before the banner, exactly like run: the composed adapter
+        # reads config.llm.name at call time, so resolving a fallback here
+        # is what makes the README's "fallbacks are tried automatically"
+        # true in chat too. Without it, a missing primary model fails
+        # every single message with a generic notice.
+        try:
+            config.llm.name = await _probe_model(config)
+        except Exception as exc:
+            console.print(f"[bad]Cannot start chat:[/] no usable model ({exc}).")
+            console.print(f"[chrome]{_model_hint(config)}[/]")
+            await _shutdown(system)
+            return 1
         # Chat and run expose the same tool surface for the same agents.
         await connect_mcp(system)
     ui.print_banner(f"chat {ui.DOT} dry-run" if fake else f"chat {ui.DOT} {config.llm.name}")
@@ -217,10 +254,10 @@ async def _cmd_run(config_path: str | None) -> int:
     system = build_system(config)
     ui.print_banner("full service")
     try:
-        chosen = await _probe_ollama(config)
+        chosen = await _probe_model(config)
     except Exception as exc:
         console.print(f"[bad]Cannot start:[/] no usable model ({exc}).")
-        console.print(f"[chrome]{_OLLAMA_HINT}[/]")
+        console.print(f"[chrome]{_model_hint(config)}[/]")
         await _shutdown(system)
         return 1
     # ensure_model may have picked a fallback; make the adapter use it.
@@ -319,12 +356,16 @@ async def _cmd_run(config_path: str | None) -> int:
 
 async def _cmd_agents_list(config_path: str | None) -> int:
     config = load_config(config_path)
-    registry = load_agents(config.agents_dir)
+    skipped: list[tuple[str, str]] = []
+    registry = load_agents(config.agents_dir, skipped=skipped)
     agents = registry.all()
-    if not agents:
+    if not agents and not skipped:
         console.print(f"[warn]No agents found in {config.agents_dir}.[/]")
         return 0
-    console.print(ui.agents_table(agents))
+    if agents:
+        console.print(ui.agents_table(agents))
+    for name, reason in skipped:
+        console.print(f"[warn]NOT LOADED:[/] {name}: {reason}")
     return 0
 
 
@@ -335,10 +376,10 @@ async def _cmd_demo_roundtrip(fake: bool, config_path: str | None) -> int:
         model = DryRunModel()
     else:
         try:
-            config.llm.name = await _probe_ollama(config)
+            config.llm.name = await _probe_model(config)
         except Exception as exc:
             console.print(f"[bad]Cannot run the round-trip:[/] {exc}")
-            console.print(f"[chrome]{_OLLAMA_HINT}[/]")
+            console.print(f"[chrome]{_model_hint(config)}[/]")
             return 1
         model = build_model(config)
 
@@ -394,29 +435,60 @@ async def _cmd_doctor(config_path: str | None) -> int:
         console.print(ui.check_line("bad", "data dir", f"not writable: {exc}"))
         hard_fail = True
 
-    registry = load_agents(config.agents_dir)
+    skipped: list[tuple[str, str]] = []
+    registry = load_agents(config.agents_dir, skipped=skipped)
     agents = registry.all()
-    if agents:
+    if agents and not skipped:
         names = ", ".join(a.manifest.name for a in agents)
         console.print(ui.check_line("ok", "agents", f"{len(agents)} loaded: {names}"))
+    elif agents:
+        # A partially loaded fleet is a warning, never an ok: version skew
+        # silently unloading an agent is exactly what doctor exists to catch.
+        console.print(
+            ui.check_line(
+                "warn",
+                "agents",
+                f"{len(agents)} loaded, {len(skipped)} NOT loaded: "
+                + "; ".join(f"{name} ({reason})" for name, reason in skipped),
+            )
+        )
     else:
         console.print(
             ui.check_line("warn", "agents", f"none found in {config.agents_dir}")
         )
 
     try:
-        chosen = await _probe_ollama(config)
+        chosen = await _probe_model(config)
         console.print(
-            ui.check_line("ok", "ollama", f"{config.llm.host} {ui.DOT} model {chosen}")
+            ui.check_line(
+                "ok",
+                "model",
+                f"{config.llm.provider} {ui.DOT} {config.llm.host} "
+                f"{ui.DOT} model {chosen}",
+            )
         )
     except Exception as exc:
         console.print(
             ui.check_line(
                 "warn",
-                "ollama",
+                "model",
                 f"unreachable ({type(exc).__name__}); chat --fake still works",
             )
         )
+    if config.llm.provider == "openai":
+        if os.environ.get(config.llm.api_key_env):
+            console.print(
+                ui.check_line("ok", "llm api key", f"{config.llm.api_key_env} is set")
+            )
+        else:
+            console.print(
+                ui.check_line(
+                    "warn",
+                    "llm api key",
+                    f"{config.llm.api_key_env} not set; only keyless "
+                    "endpoints will work",
+                )
+            )
 
     if config.discord.owner_id == 0:
         console.print(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,14 +23,27 @@ _STRICT = ConfigDict(extra="forbid")
 
 
 class ModelConfig(BaseModel):
-    """Local model backend settings."""
+    """Model backend settings. Local Ollama by default; API endpoints opt-in."""
 
     model_config = _STRICT
 
+    # "ollama" talks to a local Ollama server. "openai" talks to any
+    # OpenAI-compatible chat-completions endpoint (OpenAI, OpenRouter, Groq,
+    # LM Studio, vLLM, a private box on the LAN) at `host`, authenticated
+    # with the key from `api_key_env`. Local stays the default: pointing the
+    # brain at an external API is a deliberate opt-in, never an accident.
+    provider: Literal["ollama", "openai"] = "ollama"
     host: str = "http://127.0.0.1:11434"  # localhost by default; sovereignty
     name: str = "qwen3:8b"
     fallbacks: list[str] = Field(default_factory=lambda: ["qwen2.5:7b", "llama3.1:8b"])
     temperature: float = 0.4
+    # The key itself NEVER lives in a config file and is never logged.
+    # Empty is allowed: private endpoints on a trusted network are often
+    # keyless, and the provider will refuse loudly when a key is required.
+    api_key_env: str = "ALFRED_LLM_API_KEY"
+
+    def api_key(self) -> str:
+        return os.environ.get(self.api_key_env, "")
 
 
 class DiscordConfig(BaseModel):

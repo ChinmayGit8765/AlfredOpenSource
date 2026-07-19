@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,6 +27,7 @@ from alfred.adapters.http_transport import HttpTransportAdapter
 from alfred.adapters.local_tools import LocalToolAdapter
 from alfred.adapters.mcp_tools import CompositeToolAdapter, McpToolAdapter
 from alfred.adapters.ollama_model import OllamaModelAdapter
+from alfred.adapters.openai_model import OpenAiModelAdapter
 from alfred.adapters.sqlite_store import SqliteStoreAdapter
 from alfred.adapters.telegram_transport import TelegramTransportAdapter
 from alfred.config import AlfredConfig
@@ -101,6 +103,15 @@ class SwitchableTransport:
     async def send(self, message: OutboundMessage) -> None:
         await self.inner.send(message)
 
+    def has_route(self, prefix: str) -> bool:
+        # Forwarded so the core's route check sees through the wrapper.
+        # Non-Multi inners (chat mode, tests) default to True, keeping the
+        # configured-channel preference exactly as before.
+        inner_has_route = getattr(self.inner, "has_route", None)
+        if inner_has_route is None:
+            return True
+        return bool(inner_has_route(prefix))
+
 
 class MultiTransport:
     """Routes outbound messages to the right transport by channel namespace.
@@ -119,6 +130,9 @@ class MultiTransport:
     ) -> None:
         self._routes = dict(routes)
         self._default = default
+
+    def has_route(self, prefix: str) -> bool:
+        return prefix in self._routes or self._default is not None
 
     async def send(self, message: OutboundMessage) -> None:
         prefix = message.channel.split(":", 1)[0] if ":" in message.channel else ""
@@ -319,6 +333,9 @@ class ComposedSystem:
     heartbeat: Heartbeat
     transport: TransportPort
     mcp_slot: McpSlot | None = None
+    # (folder_name, reason) for agent folders that failed to load; surfaced
+    # in 'agents', 'status', and doctor so version skew is never invisible.
+    skipped_agents: list[tuple[str, str]] = field(default_factory=list)
 
 
 def build_system(
@@ -338,7 +355,7 @@ def build_system(
     else:
         config.data_dir.mkdir(parents=True, exist_ok=True)
         store = SqliteStoreAdapter(config.db_path)
-        model = OllamaModelAdapter(config.llm)
+        model = build_model(config)
 
     memory = MemoryService(store, clock)
     mcp_slot = McpSlot()
@@ -349,8 +366,19 @@ def build_system(
     if transport is None:
         transport = SwitchableTransport()
 
-    registry = load_agents(config.agents_dir)
+    skipped_agents: list[tuple[str, str]] = []
+    registry = load_agents(config.agents_dir, skipped=skipped_agents)
     user_model = UserModelService(store, clock)
+
+    def folders_on_disk() -> set[str]:
+        # The builder names new agents against what is actually on disk,
+        # not just what loaded: a broken folder still owns its slug, and
+        # materialisation would refuse to overwrite it after approval.
+        root = Path(config.agents_dir)
+        if not root.is_dir():
+            return set()
+        return {child.name for child in root.iterdir() if child.is_dir()}
+
     policy = Policy(
         auto_approve_reversible=config.policy.auto_approve_reversible,
         dry_run_cross_system=config.policy.dry_run_cross_system,
@@ -364,7 +392,9 @@ def build_system(
         model, tools, dispatcher, user_model, store, clock, memory=memory
     )
     conductor = Conductor(model, clock)
-    builder = AgentBuilder(model, user_model, store, clock)
+    builder = AgentBuilder(
+        model, user_model, store, clock, taken_names=folders_on_disk
+    )
     reflection = ReflectionEngine(model, user_model, store, clock)
     lapse_doctor = LapseDoctor(model, clock)
     roadmap = RoadmapService(
@@ -389,6 +419,7 @@ def build_system(
         config,
         config.agents_dir,
         memory=memory,
+        skipped_agents=skipped_agents,
     )
     heartbeat = Heartbeat(
         registry=registry,
@@ -425,6 +456,7 @@ def build_system(
         heartbeat=heartbeat,
         transport=transport,
         mcp_slot=mcp_slot,
+        skipped_agents=skipped_agents,
     )
 
 
@@ -439,13 +471,15 @@ async def connect_mcp(system: ComposedSystem) -> None:
     system.mcp_slot.inner = await McpToolAdapter.connect(system.config.mcp_servers)
 
 
-def build_model(config: AlfredConfig) -> OllamaModelAdapter:
-    """The real model adapter, for the CLI's probe and demo paths.
+def build_model(config: AlfredConfig) -> OllamaModelAdapter | OpenAiModelAdapter:
+    """The real model adapter for the configured provider.
 
-    build_system constructs its own model internally; this exists so the CLI
-    never has to instantiate an adapter itself. Returns the concrete adapter
-    so the probe can call ensure_model().
+    Used by build_system in real mode and by the CLI's probe and demo
+    paths, so nothing outside this module ever picks an adapter. Both
+    concrete types expose ensure_model() for the probe.
     """
+    if config.llm.provider == "openai":
+        return OpenAiModelAdapter(config.llm)
     return OllamaModelAdapter(config.llm)
 
 
@@ -489,6 +523,16 @@ def build_transports(
         setup.notes.append(("step", "Discord gateway starting"))
     else:
         setup.notes.append(("step", f"Discord off ({config.discord.token_env} not set)"))
+        if config.discord.channel_id:
+            setup.notes.append(
+                (
+                    "warn",
+                    "discord.channel_id is set but the Discord transport is "
+                    f"off ({config.discord.token_env} not set); scheduled "
+                    "messages fall back to wherever you last spoke. Clear "
+                    "discord.channel_id or set the token.",
+                )
+            )
 
     if config.telegram.enabled and os.environ.get(config.telegram.token_env):
         if config.telegram.owner_id == 0:
