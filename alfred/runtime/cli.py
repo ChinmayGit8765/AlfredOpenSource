@@ -20,12 +20,14 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 import alfred
+from alfred.adapters.mcp_tools import McpServerStatus
 from alfred.config import AlfredConfig, load_config
 from alfred.domain.schemas import InboundMessage, Plan
 from alfred.domain.structured import structured_call
 from alfred.errors import AlfredError, ConfigError
 from alfred.logging_setup import configure_logging
 from alfred.ports import ModelPort, OutboundMessage
+from alfred.ports.tools import CapabilityTier
 from alfred.runtime import ui
 from alfred.runtime.agent_loader import load_agents
 from alfred.runtime.composition import (
@@ -37,6 +39,7 @@ from alfred.runtime.composition import (
     build_system,
     build_transports,
     connect_mcp,
+    probe_mcp,
 )
 from alfred.runtime.ui import console
 
@@ -407,6 +410,45 @@ async def _cmd_demo_roundtrip(fake: bool, config_path: str | None) -> int:
     return 0
 
 
+def _mcp_check_lines(statuses: list[McpServerStatus]) -> list[tuple[str, str]]:
+    """One (status, text) doctor line per MCP server; pure so tests can pin it."""
+    lines: list[tuple[str, str]] = []
+    for server in statuses:
+        if not server.connected:
+            lines.append(
+                (
+                    "warn",
+                    f"server '{server.name}' did not connect; check its "
+                    "command and args (details in the log)",
+                )
+            )
+            continue
+        counts = {tier: 0 for tier in CapabilityTier}
+        for spec in server.specs:
+            counts[spec.tier] += 1
+        text = (
+            f"server '{server.name}' up: {len(server.specs)} tool(s) "
+            f"({counts[CapabilityTier.READ_ONLY]} read_only, "
+            f"{counts[CapabilityTier.REVERSIBLE_WRITE]} reversible_write, "
+            f"{counts[CapabilityTier.DESTRUCTIVE]} destructive)"
+        )
+        if server.unclassified:
+            shown = ", ".join(server.unclassified[:5])
+            more = len(server.unclassified) - 5
+            if more > 0:
+                shown += f" and {more} more"
+            lines.append(
+                (
+                    "warn",
+                    text + f"; unclassified, every call asks first: {shown}. "
+                    "List them in tool_tiers to relax the gate.",
+                )
+            )
+        else:
+            lines.append(("ok", text))
+    return lines
+
+
 async def _cmd_doctor(config_path: str | None) -> int:
     """Readiness check: everything ALFRED needs, one glance, no surprises."""
     ui.print_banner("doctor")
@@ -546,12 +588,6 @@ async def _cmd_doctor(config_path: str | None) -> int:
     if config.mcp_servers:
         try:
             import mcp  # noqa: F401
-
-            console.print(
-                ui.check_line(
-                    "ok", "mcp", f"{len(config.mcp_servers)} server(s) configured"
-                )
-            )
         except ImportError:
             console.print(
                 ui.check_line(
@@ -560,8 +596,24 @@ async def _cmd_doctor(config_path: str | None) -> int:
                     'servers configured but the extra is missing: uv pip install "alfred[mcp]"',
                 )
             )
+        else:
+            # A real connect, not an import check: doctor exists to answer
+            # "did I wire it right?", and only the live tool list does.
+            ui.step(f"connecting {len(config.mcp_servers)} MCP server(s)...")
+            probe_adapter = await probe_mcp(config)
+            try:
+                for status, text in _mcp_check_lines(probe_adapter.statuses()):
+                    console.print(ui.check_line(status, "mcp", text))
+            finally:
+                await probe_adapter.close()
     else:
-        console.print(ui.check_line("off", "mcp", "no servers configured (phase 6)"))
+        console.print(
+            ui.check_line(
+                "off",
+                "mcp",
+                "no servers configured; the recipe book is config/mcp.example.yaml",
+            )
+        )
 
     if hard_fail:
         console.print("\n[bad]Not ready.[/] Fix the failures above.")

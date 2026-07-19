@@ -23,6 +23,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from alfred.config import McpServerConfig
@@ -110,6 +111,21 @@ class _ServerState:
         # never attempted, so the first use may connect immediately.
         self.last_attempt: float | None = None
         self.lock = asyncio.Lock()
+
+
+@dataclass(frozen=True)
+class McpServerStatus:
+    """One configured server's state, for doctor and status surfaces.
+
+    unclassified holds the bare tool names missing from tool_tiers: they
+    still work, on the strictest gate, but the owner deserves to see the
+    list because "every call asks first" usually means a forgotten entry.
+    """
+
+    name: str
+    connected: bool
+    specs: tuple[ToolSpec, ...]
+    unclassified: tuple[str, ...]
 
 
 class McpToolAdapter:
@@ -280,6 +296,33 @@ class McpToolAdapter:
                 )
             )
         return specs
+
+    def statuses(self) -> list[McpServerStatus]:
+        """Current per-server state, without triggering reconnects.
+
+        A snapshot for doctor and status surfaces: connect() ran just
+        before, so poking a dead server here would only double the wait.
+        """
+        out: list[McpServerStatus] = []
+        for state in self._states.values():
+            tiers = state.config.tool_tiers
+            unclassified = tuple(
+                bare
+                for spec in state.specs
+                # Mirrors _tier_for: either the bare or the qualified name
+                # counts as classified.
+                if (bare := spec.name.partition(".")[2]) not in tiers
+                and spec.name not in tiers
+            )
+            out.append(
+                McpServerStatus(
+                    name=state.config.name,
+                    connected=state.session is not None,
+                    specs=tuple(state.specs),
+                    unclassified=unclassified,
+                )
+            )
+        return out
 
     async def list_tools(self) -> list[ToolSpec]:
         # Dead servers are not advertised: offering a tool that cannot run

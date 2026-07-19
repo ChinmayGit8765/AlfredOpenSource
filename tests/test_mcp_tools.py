@@ -170,6 +170,44 @@ def test_missing_description_and_schema_default_to_empty():
 
 
 # ---------------------------------------------------------------------------
+# statuses: the doctor's snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_statuses_reports_tools_and_names_the_unclassified():
+    config = McpServerConfig(
+        name="cal",
+        command="fake-server",
+        # One classified by bare name, one by qualified name: both count,
+        # mirroring how _tier_for resolves them at dispatch time.
+        tool_tiers={"list_events": "read_only", "cal.create_event": "reversible_write"},
+    )
+    adapter = McpToolAdapter(servers=[config], connector=FakeConnector())
+    state = adapter._states["cal"]
+    state.session = StubSession()
+    state.specs = McpToolAdapter._specs_for_server(
+        config,
+        [mcp_tool("list_events"), mcp_tool("create_event"), mcp_tool("wipe_all")],
+    )
+
+    [status] = adapter.statuses()
+
+    assert status.name == "cal"
+    assert status.connected is True
+    assert len(status.specs) == 3
+    assert status.unclassified == ("wipe_all",)
+
+
+def test_statuses_marks_dead_server_disconnected():
+    adapter = McpToolAdapter(servers=[server_config("cal")], connector=FakeConnector())
+
+    [status] = adapter.statuses()
+
+    assert status.connected is False
+    assert status.specs == ()
+
+
+# ---------------------------------------------------------------------------
 # invoke: routing and result mapping
 # ---------------------------------------------------------------------------
 

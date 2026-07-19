@@ -471,6 +471,15 @@ async def connect_mcp(system: ComposedSystem) -> None:
     system.mcp_slot.inner = await McpToolAdapter.connect(system.config.mcp_servers)
 
 
+async def probe_mcp(config: AlfredConfig) -> McpToolAdapter:
+    """A throwaway connected adapter for doctor's MCP check.
+
+    Lives here so the CLI never constructs an adapter itself; the caller
+    reads statuses() and MUST close() it.
+    """
+    return await McpToolAdapter.connect(config.mcp_servers)
+
+
 def build_model(config: AlfredConfig) -> OllamaModelAdapter | OpenAiModelAdapter:
     """The real model adapter for the configured provider.
 

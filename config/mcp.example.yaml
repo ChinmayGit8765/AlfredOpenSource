@@ -29,19 +29,38 @@
 # with zero new ALFRED code. Copy a block into mcp_servers: in alfred.yaml.
 #
 # --- Calendar: the canonical first connector -------------------------------
+# Google Calendar via @cocal/google-calendar-mcp (needs Node 18+ for npx).
+# docs/CONNECTORS.md walks this end to end. One-time setup:
+#   1. Google Cloud Console: create a project, enable the Google Calendar
+#      API, create an OAuth client (Desktop app), download the JSON file.
+#   2. Authenticate once in a terminal (opens your browser):
+#        $env:GOOGLE_OAUTH_CREDENTIALS = "C:/Users/you/.config/gcp-oauth.keys.json"
+#        npx -y @cocal/google-calendar-mcp auth
+#   3. Copy this block into mcp_servers: in config/alfred.yaml, then run
+#      alfred doctor: it connects and reports every tool and its gate.
+#   4. Grant tools per agent, e.g. add "calendar.get-freebusy" to an
+#      agent's allowed_tools. Connecting grants nothing by itself.
 # mcp_servers:
 #   - name: calendar
 #     command: npx
-#     args: ["-y", "example-calendar-mcp-server"]
+#     args: ["-y", "@cocal/google-calendar-mcp"]
 #     env:
-#       CALENDAR_CREDENTIALS_FILE: "C:/Users/you/.config/calendar/credentials.json"
+#       GOOGLE_OAUTH_CREDENTIALS: "C:/Users/you/.config/gcp-oauth.keys.json"
 #     tool_tiers:
-#       list_events: read_only
-#       get_event: read_only
-#       check_availability: read_only
-#       create_event: reversible_write
-#       update_event: reversible_write
-#       delete_event: destructive
+#       list-calendars: read_only
+#       list-events: read_only
+#       search-events: read_only
+#       get-event: read_only
+#       get-freebusy: read_only
+#       get-current-time: read_only
+#       list-colors: read_only
+#       create-event: reversible_write
+#       update-event: reversible_write
+#       respond-to-event: reversible_write
+#       delete-event: destructive
+#       # manage-accounts stays unlisted on purpose: changing which Google
+#       # accounts ALFRED can reach is an owner action at the terminal,
+#       # never an agent's tool call. Unlisted = destructive = always asks.
 #
 # --- Filesystem: notes, documents, training logs ---------------------------
 #   - name: files

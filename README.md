@@ -9,7 +9,7 @@
 [![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
-[![offline tests](https://img.shields.io/badge/tests-508%20offline-success)](tests/)
+[![offline tests](https://img.shields.io/badge/tests-514%20offline-success)](tests/)
 
 <img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
 
@@ -64,11 +64,14 @@ Build-order phases 1 through 6 are implemented and tested:
    gently. Wired through every transport and the heartbeat (`alfred chat`,
    then `goal <goal>`).
 
-The MCP action layer (the horizon's first step) is scaffolded and behind config: the
-`McpToolAdapter` is implemented (namespaced tools, per-tool capability
-tiers, destructive by default), the `mcp` dependency is an optional extra,
-and `mcp_servers` defaults to an empty list. No MCP server connects unless
-you configure one.
+The MCP action layer is live behind config: the `McpToolAdapter` is
+implemented (namespaced tools, per-tool capability tiers, destructive by
+default, lazy reconnection when a server dies), `alfred doctor` connects
+to every configured server and reports the live tool list with its gates,
+and the calendar has a real recipe with the tier map worked out
+([docs/CONNECTORS.md](docs/CONNECTORS.md) walks it end to end). The `mcp`
+dependency stays an optional extra and `mcp_servers` defaults to an empty
+list: no server connects unless you configure one.
 
 ## Quickstart
 
@@ -168,10 +171,12 @@ token to `127.0.0.1:8765/message`, replies in the response body. Bind it
 beyond localhost only if you mean it.
 
 On the action side, the MCP layer is the connector surface: calendar,
-filesystem, notes vault, GitHub, home automation, wearables. See the
-recipe book in [config/mcp.example.yaml](config/mcp.example.yaml); every
-server the ecosystem publishes is a new ALFRED capability with zero new
-ALFRED code, and unclassified tools always land on the strictest gate.
+filesystem, notes vault, GitHub, home automation, wearables. Start with
+the calendar: [docs/CONNECTORS.md](docs/CONNECTORS.md) walks it end to
+end, and the recipe book is
+[config/mcp.example.yaml](config/mcp.example.yaml). Every server the
+ecosystem publishes is a new ALFRED capability with zero new ALFRED code,
+and unclassified tools always land on the strictest gate.
 
 ## How it works
 
@@ -356,8 +361,11 @@ every port (not mocks). Nothing needs Ollama or Discord.
 
 The horizon, in order (see [docs/SPEC.md](docs/SPEC.md)):
 
-- **Calendar connector first**: the first real MCP server, with read-only
-  tools auto-approved and event writes gated by tier.
+- **Calendar connector first**: done as far as code can take it. A real
+  recipe (`@cocal/google-calendar-mcp`) with the tier map worked out,
+  read-only tools auto-approved, event writes gated, and doctor verifying
+  the wiring live. Connecting yours is
+  [docs/CONNECTORS.md](docs/CONNECTORS.md).
 - **Cross-system workflows**: one intent composed across several connected
   systems. The dry-run preview gate for cross-system writes is already in
   place; composing a single intent across systems is the work that remains.
