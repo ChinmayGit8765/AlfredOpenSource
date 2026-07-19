@@ -46,7 +46,9 @@ Build-order phases 1 through 6 are implemented and tested:
    output, with a bounded retry loop that feeds validation errors back to
    the model (`alfred demo-roundtrip`).
 2. **Core + agents**: manifest schema, folder discovery, the orchestration
-   core, three hand-written agents (training, study, build), and the CLI.
+   core, five hand-written agents (training, study, build, plus two meta
+   agents: qa double-checks the fleet's plans, scout suggests new agents
+   and MCP connectors), and the CLI.
 3. **Transport**: Discord, Telegram, and a local HTTP API, each obeying
    only the configured owner and silently ignoring everyone else (see the
    transport table below).
@@ -93,12 +95,40 @@ alfred agents list                 # the discovered agent folders, lifecycle col
 
 Install [Ollama](https://ollama.com), then pull the configured model
 (default is `qwen3:8b`; fallbacks `qwen2.5:7b` and `llama3.1:8b` are tried
-automatically if the primary is not pulled):
+automatically if the primary is not pulled). Any chat model works; see
+[docs/MODELS.md](docs/MODELS.md) for the full guide to free local models,
+hardware sizing, and every supported backend:
 
 ```powershell
 ollama pull qwen3:8b
 alfred chat
 ```
+
+### API brain (optional)
+
+The brain stays local by default, but any OpenAI-compatible endpoint can
+power it instead: a hosted provider (OpenAI, OpenRouter, Groq, Together,
+DeepSeek) or a private server you already run (LM Studio, vLLM,
+llama.cpp, another machine's Ollama at `/v1`). In `config/alfred.yaml`:
+
+```yaml
+llm:
+  provider: openai
+  host: "https://api.openai.com/v1"   # or your private endpoint
+  name: "gpt-4.1-mini"                # the model id the provider expects
+```
+
+Then export the key (skip for keyless private endpoints):
+
+```powershell
+$env:ALFRED_LLM_API_KEY = "sk-..."
+alfred chat
+```
+
+The key lives only in the environment, never in config or logs.
+Everything else (governance, allowlists, audit, transports) is identical
+whichever brain answers. [docs/MODELS.md](docs/MODELS.md) lists the base
+URLs and notes for every common provider and local server.
 
 ### Full service (Discord + heartbeat)
 
@@ -293,10 +323,12 @@ defaults:
 | `data_dir` | `data` | database and runtime state |
 | `agents_dir` | `agents` | scanned for agent folders at startup |
 | `db_filename` | `alfred.db` | SQLite file inside data_dir |
-| `llm.host` | `http://127.0.0.1:11434` | Ollama server, localhost by default |
+| `llm.provider` | `ollama` | `ollama` (local) or `openai` (any OpenAI-compatible API) |
+| `llm.host` | `http://127.0.0.1:11434` | Ollama server, or the API base URL for `openai` |
 | `llm.name` | `qwen3:8b` | primary model |
 | `llm.fallbacks` | `[qwen2.5:7b, llama3.1:8b]` | tried in order if primary not pulled |
 | `llm.temperature` | `0.4` | default sampling temperature |
+| `llm.api_key_env` | `ALFRED_LLM_API_KEY` | env var holding the API key for `openai` |
 | `discord.token_env` | `ALFRED_DISCORD_TOKEN` | env var holding the bot token |
 | `discord.owner_id` | `0` | the only Discord user ALFRED obeys |
 | `discord.channel_id` | `null` | optionally restrict to one channel |

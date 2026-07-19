@@ -451,6 +451,21 @@ class OllamaModelAdapter:                       # implements ModelPort
         # hardware-aware pick: returns config.name if pulled locally, else
         # first available fallback; raises ConfigError when nothing usable
 
+# adapters/openai_model.py
+class OpenAiModelAdapter:                       # implements ModelPort
+    def __init__(self, config: ModelConfig, *, client=None) -> None
+    async def complete(...) -> str
+        # any OpenAI-compatible /chat/completions endpoint (hosted or
+        # private); maps json_schema -> response_format, retrying once
+        # without it when the server rejects constrained decoding. The
+        # key comes from config.api_key_env, is optional (keyless private
+        # endpoints), and never appears in logs or errors.
+    async def ensure_model(self) -> str
+        # reachability plus a best-effort /models check: fallbacks resolve
+        # like ollama's, an unlisted name warns but proceeds, auth failure
+        # raises ConfigError
+    async def close(self) -> None
+
 # adapters/sqlite_store.py
 class SqliteStoreAdapter:                       # implements StorePort
     def __init__(self, db_path: str | Path) -> None
@@ -553,7 +568,10 @@ def build_system(config: AlfredConfig, *, fake: bool = False,
     # heartbeat, transport, store, registry, roadmap, lapse_doctor for the
     # CLI to drive.
     # transport defaults to a SwitchableTransport slot the CLI fills later.
-def build_model(config: AlfredConfig) -> OllamaModelAdapter   # for CLI probe/demo
+def build_model(config: AlfredConfig) -> OllamaModelAdapter | OpenAiModelAdapter
+    # the real model adapter for config.llm.provider ("ollama" | "openai");
+    # used by build_system and the CLI probe/demo, so adapter choice
+    # happens only here
 def build_transports(config, handler) -> TransportSetup       # routes + CLI notes
     # All adapter construction lives here; the CLI only renders notes and runs
     # the transports these factories return.
