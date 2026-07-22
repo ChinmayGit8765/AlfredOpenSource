@@ -35,7 +35,7 @@ from alfred.domain.builder import AgentBuilder
 from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
-from alfred.domain.governance import PendingActions, Policy, Proposals
+from alfred.domain.governance import PendingActions, Policy, Proposals, WorkflowTrust
 from alfred.domain.lifecycle import LapseDoctor
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
@@ -387,7 +387,10 @@ def build_system(
         store, clock, ttl_hours=config.policy.pending_action_ttl_hours
     )
     proposals = Proposals(store, clock)
-    dispatcher = ToolDispatcher(tools, store, clock, policy, pending)
+    trust = WorkflowTrust(
+        store, clock, threshold=config.policy.trust_after_approvals
+    )
+    dispatcher = ToolDispatcher(tools, store, clock, policy, pending, trust=trust)
     executor = AgentExecutor(
         model, tools, dispatcher, user_model, store, clock, memory=memory
     )
@@ -420,6 +423,7 @@ def build_system(
         config.agents_dir,
         memory=memory,
         skipped_agents=skipped_agents,
+        trust=trust,
     )
     heartbeat = Heartbeat(
         registry=registry,

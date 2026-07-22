@@ -12,13 +12,13 @@ import logging
 
 from pydantic import BaseModel
 
-from alfred.domain.governance import PendingActions, Policy, audit
+from alfred.domain.governance import PendingActions, Policy, WorkflowTrust, audit
 from alfred.domain.registry import LoadedAgent
 from alfred.domain.schemas import Lifecycle, PendingAction, Provenance, ToolCall
 from alfred.errors import ToolNotAllowedError, ToolNotFoundError
 from alfred.ports.clock import ClockPort
 from alfred.ports.store import StorePort
-from alfred.ports.tools import ToolPort, ToolResult, ToolSpec
+from alfred.ports.tools import CapabilityTier, ToolPort, ToolResult, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +40,15 @@ class ToolDispatcher:
         clock: ClockPort,
         policy: Policy,
         pending: PendingActions,
+        trust: WorkflowTrust | None = None,
     ) -> None:
         self._tools = tools
         self._store = store
         self._clock = clock
         self._policy = policy
         self._pending = pending
+        # Default threshold 0: with no wired dial, nothing is ever trusted.
+        self._trust = trust or WorkflowTrust(store, clock, threshold=0)
 
     async def dispatch(
         self,
@@ -85,8 +88,20 @@ class ToolDispatcher:
         # A non-local source is an external system (an MCP server); the
         # policy previews cross-system writes until the owner trusts them.
         cross_system = spec.source != "local"
+        # The autonomy dial: an earned run of confirmations can retire the
+        # preview for THIS agent calling THIS tool. Never consulted for
+        # external content (a prompt injection cannot ride earned trust)
+        # and only for the one tier trust can ever relax, so reads and
+        # destructive calls never pay the lookup.
+        trusted = False
+        if (
+            cross_system
+            and provenance != "external"
+            and spec.tier == CapabilityTier.REVERSIBLE_WRITE
+        ):
+            trusted = await self._trust.is_trusted(agent_name, call.tool)
         if self._policy.requires_confirmation(
-            spec.tier, provenance, cross_system=cross_system
+            spec.tier, provenance, cross_system=cross_system, trusted=trusted
         ):
             # A model that ignores "awaits confirmation" feedback re-emits
             # the same gated call every round; without this reuse the owner
@@ -121,6 +136,7 @@ class ToolDispatcher:
                 provenance,
                 reason=reason,
                 bundle_id=bundle_id,
+                cross_system=cross_system,
             )
             gated: dict[str, object] = {
                 "agent": agent_name,
@@ -135,16 +151,17 @@ class ToolDispatcher:
             return DispatchOutcome(pending=action)
 
         result = await self._tools.invoke(call.tool, call.args)
-        await audit(
-            self._store,
-            self._clock,
-            "tool_executed",
-            agent=agent_name,
-            tool=call.tool,
-            tier=spec.tier.value,
-            provenance=provenance,
-            ok=result.ok,
-        )
+        executed: dict[str, object] = {
+            "agent": agent_name,
+            "tool": call.tool,
+            "tier": spec.tier.value,
+            "provenance": provenance,
+            "ok": result.ok,
+        }
+        if trusted:
+            # The trail must show WHY no preview happened for this write.
+            executed["trusted_workflow"] = True
+        await audit(self._store, self._clock, "tool_executed", **executed)
         return DispatchOutcome(result=result)
 
     async def execute_confirmed(

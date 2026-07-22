@@ -9,7 +9,7 @@
 [![ci](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml/badge.svg)](https://github.com/ChinmayGit8765/AlfredOpenSource/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-gold)](LICENSE)
-[![offline tests](https://img.shields.io/badge/tests-518%20offline-success)](tests/)
+[![offline tests](https://img.shields.io/badge/tests-529%20offline-success)](tests/)
 
 <img src="docs/assets/terminal.svg" alt="ALFRED terminal session" width="780">
 
@@ -316,7 +316,12 @@ deny-by-default and only the owner widens them. And until you trust a
 workflow, any write that reaches an external system (a tool from an MCP
 server, not a built-in one) is previewed for your confirmation before it
 runs, even if its tier would auto-approve: the `policy.dry_run_cross_system`
-gate, on by default. Every dispatch decision is audited. Full model,
+gate, on by default. Trust is then earned per workflow, never granted
+globally: set `policy.trust_after_approvals` (the autonomy dial, off by
+default) and one agent calling one tool stops previewing after N
+confirmations in a row. A single deny resets it, `distrust <agent> <tool>`
+revokes it, `trust` shows every workflow's standing, and destructive tools
+and external content never relax. Every dispatch decision is audited. Full model,
 including the prompt-injection stance and the kill switch reality, in
 [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
 
@@ -346,6 +351,7 @@ defaults:
 | `heartbeat.roadmap_nudge_days` | `1` | gentle next-win nudge cadence; `0` disables |
 | `policy.auto_approve_reversible` | `true` | reversible writes run without asking (audited) |
 | `policy.pending_action_ttl_hours` | `24` | gated actions expire after this |
+| `policy.trust_after_approvals` | `0` | the autonomy dial; `0` means previews never relax |
 | `mcp_servers` | `[]` | MCP action layer; see config/mcp.example.yaml |
 
 Secrets live only in the environment. The Discord token is read from
@@ -376,8 +382,11 @@ The horizon, in order (see [docs/SPEC.md](docs/SPEC.md)):
   own tier, allowlist, and audit ([docs/GOVERNANCE.md](docs/GOVERNANCE.md)).
 - **Expanding MCP surface**: every server the owner connects becomes a
   capability behind `ToolPort`; no bespoke integrations, ever.
-- **Autonomy dial**: confirmation requirements that relax per workflow as
-  trust accumulates, never globally and never by default.
+- **Autonomy dial**: landed. Set `policy.trust_after_approvals` and a
+  workflow (one agent calling one tool) you confirm N times in a row earns
+  its way out of the cross-system preview; a deny resets it, `distrust`
+  revokes it, and destructive tools and external content never relax.
+  Off by default: trust is opt-in, earned, and per workflow, never global.
 
 ## License
 

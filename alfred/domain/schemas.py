@@ -78,6 +78,7 @@ class Collections:
     BUILDER_SESSIONS = "builder_sessions"
     HEARTBEAT = "heartbeat"  # keyed; last-run timestamps per job
     MESSAGES = "messages"  # inbound message log
+    WORKFLOW_TRUST = "workflow_trust"  # keyed; per (agent, tool) approval runs
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +273,24 @@ class PendingAction(BaseModel):
     # a confirmed bundle executes the way the agent composed it.
     bundle_id: str | None = None
     bundle_seq: int = 0
+    # Stamped at gating time so the confirm path can tell which approvals
+    # feed the autonomy dial without re-resolving the tool's source.
+    cross_system: bool = False
+
+
+class WorkflowTrustRecord(BaseModel):
+    """One workflow's earned trust: an agent calling one tool.
+
+    approvals counts CONSECUTIVE owner confirmations; any deny zeroes it.
+    Whether the run amounts to trusted is judged against the configured
+    threshold at read time, so changing the dial reclassifies every
+    workflow immediately, in both directions.
+    """
+
+    agent: str
+    tool: str
+    approvals: int = 0
+    updated_at: datetime | None = None
 
 
 class ExecutionResult(BaseModel):

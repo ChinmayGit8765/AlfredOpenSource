@@ -111,6 +111,37 @@ each member is gated by its own tier and provenance exactly as before, and
 each execution and refusal is audited individually, linked by the bundle
 id in the audit trail.
 
+## The autonomy dial: trust earned per workflow
+
+The dry-run gate previews every cross-system write until a workflow is
+trusted. The autonomy dial is how that trust is actually earned, and its
+unit is deliberately small: one workflow is ONE agent calling ONE tool.
+Nothing transfers; training earning the right to create calendar events
+says nothing about study, and nothing about deleting them.
+
+Off by default. Set `policy.trust_after_approvals` to a positive N and a
+workflow you confirm N times IN A ROW stops being previewed; ALFRED
+announces the crossing in the confirmation reply, names the workflow, and
+tells you how to revoke it. From then on that one write runs
+automatically, audited with `trusted_workflow: true` so the trail always
+shows why no preview happened.
+
+Distrust is always cheaper than trust:
+
+- A single `deny` of that workflow's action zeroes its run of approvals.
+- `distrust <agent> <tool>` revokes it manually, any time, no questions.
+- `trust` in chat lists every workflow's standing: trusted, or n of N.
+- Turning the dial down (or to 0) reclassifies every workflow instantly;
+  earned approvals are remembered but trust is judged against the current
+  threshold at every dispatch.
+
+What the dial can never relax, whatever it is set to: destructive tools
+(they confirm every time, for everyone), externally-triggered content (a
+prompt injection cannot ride earned trust; trust is not even consulted
+for external provenance), and allowlists (an untrusted OR trusted
+workflow still exists only if the owner put the tool on that agent's
+manifest). The dial retires previews, never gates.
+
 ## Proposals: self-change with a human in the loop
 
 ALFRED never modifies itself silently. Changes to its own prompts,

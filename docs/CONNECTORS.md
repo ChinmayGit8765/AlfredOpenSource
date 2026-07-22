@@ -101,8 +101,11 @@ Start read-only. Widen to writes when you have seen the reads behave.
   writes reaching an external system, so while
   `policy.dry_run_cross_system` is on (the default) each one is previewed
   for your confirmation before it runs. Rule on it in chat with
-  `confirm <id>` or `deny <id>`. Turn the gate off once the workflow has
-  earned trust.
+  `confirm <id>` or `deny <id>`. To retire the preview, prefer the
+  autonomy dial over turning the gate off: set
+  `policy.trust_after_approvals` and each workflow earns its own way out,
+  one agent and one tool at a time (see
+  [GOVERNANCE.md](GOVERNANCE.md)).
 - `delete-event` asks every time, no exceptions.
 - When one ask needs several writes (an event AND a note in another
   connector), they surface as one composed intent: a numbered preview you

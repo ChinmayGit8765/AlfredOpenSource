@@ -17,7 +17,7 @@ from alfred.domain.builder import AgentBuilder
 from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
-from alfred.domain.governance import PendingActions, Policy, Proposals
+from alfred.domain.governance import PendingActions, Policy, Proposals, WorkflowTrust
 from alfred.domain.lifecycle import LapseDoctor
 from alfred.domain.reflection import ReflectionEngine
 from alfred.domain.registry import AgentRegistry, LoadedAgent
@@ -106,6 +106,7 @@ def make_world(
     agents: list[LoadedAgent],
     tools: FakeTools | None = None,
     store: MemoryStore | None = None,
+    trust_after_approvals: int = 0,
 ) -> World:
     store = store or MemoryStore()
     clock = FakeClock()
@@ -115,7 +116,8 @@ def make_world(
     user_model = UserModelService(store, clock)
     pending = PendingActions(store, clock)
     proposals = Proposals(store, clock)
-    dispatcher = ToolDispatcher(tools, store, clock, Policy(), pending)
+    trust = WorkflowTrust(store, clock, threshold=trust_after_approvals)
+    dispatcher = ToolDispatcher(tools, store, clock, Policy(), pending, trust=trust)
     executor = AgentExecutor(model, tools, dispatcher, user_model, store, clock)
     conductor = Conductor(model, clock)
     builder = AgentBuilder(model, user_model, store, clock)
@@ -143,6 +145,7 @@ def make_world(
         transport,
         config,
         agents_dir,
+        trust=trust,
     )
     return World(
         core=core,
@@ -403,6 +406,96 @@ async def test_composed_intent_stops_at_first_failure(tmp_path: Path) -> None:
     texts = sent_texts(world)
     assert any("calendar said no" in t for t in texts)
     assert any("Stopped there" in t for t in texts)
+
+
+def _calendar_world(tmp_path: Path, *, sessions: int, threshold: int) -> World:
+    """A world whose agent books one cross-system calendar write per ask."""
+    tools = FakeTools()
+    tools.add(
+        "calendar.create_event",
+        tier=CapabilityTier.REVERSIBLE_WRITE,
+        source="mcp:calendar",
+        handler=lambda **kwargs: {"created": True},
+    )
+    model = FakeModel(
+        [
+            agent_reply(
+                "Putting it on the calendar.",
+                tool_calls=[
+                    {
+                        "tool": "calendar.create_event",
+                        "args": {"title": f"session {n}"},
+                        "reason": "anchor the session",
+                    }
+                ],
+            )
+            for n in range(sessions)
+        ]
+    )
+    return make_world(
+        tmp_path,
+        model,
+        [
+            make_agent(
+                "training", ["train"], allowed_tools=["calendar.create_event"]
+            )
+        ],
+        tools=tools,
+        trust_after_approvals=threshold,
+    )
+
+
+async def test_autonomy_dial_earns_announces_and_revokes_trust(
+    tmp_path: Path,
+) -> None:
+    world = _calendar_world(tmp_path, sessions=5, threshold=2)
+
+    # Round 1: previewed, confirmed. One approval on record.
+    await world.core.handle_inbound(inbound("train: book session one"))
+    [first] = await world.pending.list_pending()
+    await world.core.handle_inbound(inbound(f"confirm {first.id}"))
+    assert len(world.tools.invocations) == 1
+
+    # Round 2: previewed, confirmed; the threshold crossing is announced.
+    await world.core.handle_inbound(inbound("train: book session two"))
+    [second] = await world.pending.list_pending()
+    await world.core.handle_inbound(inbound(f"confirm {second.id}"))
+    assert any("stop previewing" in t for t in sent_texts(world))
+
+    # Round 3: trusted, so the write runs with no preview at all.
+    await world.core.handle_inbound(inbound("train: book session three"))
+    assert await world.pending.list_pending() == []
+    assert len(world.tools.invocations) == 3
+
+    # 'trust' shows the standing; 'distrust' revokes it.
+    await world.core.handle_inbound(inbound("trust"))
+    assert any(
+        "trusted" in t and "calendar.create_event" in t for t in sent_texts(world)
+    )
+    await world.core.handle_inbound(
+        inbound("distrust training calendar.create_event")
+    )
+
+    # Round 4: previewing again, from zero.
+    await world.core.handle_inbound(inbound("train: book session four"))
+    assert len(await world.pending.list_pending()) == 1
+
+
+async def test_a_single_deny_resets_earned_progress(tmp_path: Path) -> None:
+    world = _calendar_world(tmp_path, sessions=3, threshold=2)
+
+    await world.core.handle_inbound(inbound("train: book session one"))
+    [first] = await world.pending.list_pending()
+    await world.core.handle_inbound(inbound(f"confirm {first.id}"))
+
+    await world.core.handle_inbound(inbound("train: book session two"))
+    [second] = await world.pending.list_pending()
+    await world.core.handle_inbound(inbound(f"deny {second.id}"))
+
+    # The approval run is zeroed: the next ask previews instead of running.
+    await world.core.handle_inbound(inbound("train: book session three"))
+    assert len(await world.pending.list_pending()) == 1
+    assert len(world.tools.invocations) == 1
 
 
 async def test_outcome_shorthand_records_outcome(tmp_path: Path) -> None:

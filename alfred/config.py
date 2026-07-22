@@ -134,6 +134,13 @@ class PolicyConfig(BaseModel):
     auto_approve_reversible: bool = True  # reversible writes run, but are audited
     dry_run_cross_system: bool = True  # multi-system workflows preview first
     pending_action_ttl_hours: int = 24
+    # The autonomy dial. 0 (the default) means trust is never earned and
+    # every cross-system write previews forever. A positive N lets one
+    # workflow (one agent calling one tool) skip the dry-run preview after
+    # the owner has confirmed it N times in a row; a single deny resets
+    # that workflow to zero. Relaxation is always per workflow, never
+    # global, and never touches destructive tools or external content.
+    trust_after_approvals: int = Field(default=0, ge=0)
 
 
 class McpServerConfig(BaseModel):

@@ -20,6 +20,7 @@ from alfred.domain.schemas import (
     ProposalKind,
     Provenance,
     ToolCall,
+    WorkflowTrustRecord,
     load_or_none,
 )
 from alfred.errors import AlfredError
@@ -56,6 +57,7 @@ class Policy:
         provenance: Provenance,
         *,
         cross_system: bool = False,
+        trusted: bool = False,
     ) -> bool:
         # External content never auto-executes anything above READ_ONLY,
         # and destructive actions are never auto-executed at all.
@@ -66,7 +68,15 @@ class Policy:
         # a local tool) is previewed for confirmation rather than executed,
         # even when its tier would otherwise auto-approve. Read-only
         # cross-system calls are not actions, so they are never previewed.
-        if cross_system and self.dry_run_cross_system and tier != CapabilityTier.READ_ONLY:
+        # trusted relaxes ONLY this clause: the autonomy dial can retire a
+        # workflow's preview, never a destructive gate (caught above) and
+        # never an external-content gate (caught below).
+        if (
+            cross_system
+            and self.dry_run_cross_system
+            and tier != CapabilityTier.READ_ONLY
+            and not trusted
+        ):
             return True
         if tier == CapabilityTier.REVERSIBLE_WRITE:
             return provenance == "external" or not self.auto_approve_reversible
@@ -75,6 +85,109 @@ class Policy:
 
 def _strip_key(doc: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in doc.items() if k != "_key"}
+
+
+class WorkflowTrust:
+    """The autonomy dial's ledger: consecutive approvals per (agent, tool).
+
+    A workflow is one agent calling one tool. Trust is earned by the owner
+    confirming that workflow's previewed cross-system writes threshold
+    times IN A ROW, and a single deny zeroes the run: distrust is always
+    cheaper than trust. threshold 0 means the dial is off and nothing is
+    ever trusted, whatever the ledger says; the ledger still records, so
+    turning the dial on later honours confirmations already given.
+    """
+
+    def __init__(self, store: StorePort, clock: ClockPort, threshold: int = 0) -> None:
+        self._store = store
+        self._clock = clock
+        self.threshold = threshold
+
+    @staticmethod
+    def _key(agent: str, tool: str) -> str:
+        # Tool names may contain dots (MCP namespacing); agent slugs cannot
+        # contain ':', so the double colon cannot collide.
+        return f"{agent}::{tool}"
+
+    async def is_trusted(self, agent: str, tool: str) -> bool:
+        if self.threshold <= 0:
+            return False
+        record = await self._get(agent, tool)
+        return record is not None and record.approvals >= self.threshold
+
+    async def record_approval(self, agent: str, tool: str) -> tuple[int, bool]:
+        """Count one owner confirmation; returns (approvals, newly_trusted)."""
+        record = await self._get(agent, tool) or WorkflowTrustRecord(
+            agent=agent, tool=tool
+        )
+        before = record.approvals
+        record = record.model_copy(
+            update={"approvals": before + 1, "updated_at": self._clock.now()}
+        )
+        await self._save(record)
+        newly_trusted = (
+            self.threshold > 0 and before < self.threshold <= record.approvals
+        )
+        if newly_trusted:
+            await audit(
+                self._store,
+                self._clock,
+                "workflow_trusted",
+                agent=agent,
+                tool=tool,
+                approvals=record.approvals,
+                threshold=self.threshold,
+            )
+        return record.approvals, newly_trusted
+
+    async def reset(self, agent: str, tool: str, *, cause: str) -> None:
+        """Zero one workflow's run; the audit says why (denied, distrust)."""
+        record = await self._get(agent, tool)
+        if record is None or record.approvals == 0:
+            return
+        await self._save(
+            record.model_copy(update={"approvals": 0, "updated_at": self._clock.now()})
+        )
+        await audit(
+            self._store,
+            self._clock,
+            "workflow_trust_reset",
+            agent=agent,
+            tool=tool,
+            cause=cause,
+            approvals_lost=record.approvals,
+        )
+
+    async def all_records(self) -> list[WorkflowTrustRecord]:
+        docs = await self._store.query(Collections.WORKFLOW_TRUST)
+        records = [
+            record
+            for doc in docs
+            if (
+                record := load_or_none(
+                    WorkflowTrustRecord, doc, source=Collections.WORKFLOW_TRUST
+                )
+            )
+            is not None
+        ]
+        return sorted(records, key=lambda r: (r.agent, r.tool))
+
+    async def _get(self, agent: str, tool: str) -> WorkflowTrustRecord | None:
+        doc = await self._store.get(
+            Collections.WORKFLOW_TRUST, self._key(agent, tool)
+        )
+        if doc is None:
+            return None
+        return load_or_none(
+            WorkflowTrustRecord, doc, source=Collections.WORKFLOW_TRUST
+        )
+
+    async def _save(self, record: WorkflowTrustRecord) -> None:
+        await self._store.put(
+            Collections.WORKFLOW_TRUST,
+            self._key(record.agent, record.tool),
+            record.model_dump(mode="json"),
+        )
 
 
 class PendingActions:
@@ -93,6 +206,7 @@ class PendingActions:
         provenance: Provenance,
         reason: str = "",
         bundle_id: str | None = None,
+        cross_system: bool = False,
     ) -> PendingAction:
         seq = 0
         if bundle_id is not None:
@@ -113,6 +227,7 @@ class PendingActions:
             created_at=self._clock.now(),
             bundle_id=bundle_id,
             bundle_seq=seq,
+            cross_system=cross_system,
         )
         await self._save(action)
         return action

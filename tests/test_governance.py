@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from alfred.domain.governance import PendingActions, Policy, Proposals, audit
+from alfred.domain.governance import (
+    PendingActions,
+    Policy,
+    Proposals,
+    WorkflowTrust,
+    audit,
+)
 from alfred.domain.schemas import Collections, Proposal, ProposalKind, ToolCall
 from alfred.errors import AlfredError
 from alfred.ports.tools import CapabilityTier
@@ -74,6 +80,93 @@ def test_dry_run_off_lets_trusted_cross_system_writes_run():
     assert policy.requires_confirmation(REVERSIBLE, "owner", cross_system=True) is False
     # Destructive is still always gated regardless of the dry-run setting.
     assert policy.requires_confirmation(DESTRUCTIVE, "owner", cross_system=True) is True
+
+
+def test_trusted_relaxes_only_the_dry_run_preview():
+    policy = Policy(auto_approve_reversible=True, dry_run_cross_system=True)
+    # The one clause trust may relax: owner-side cross-system reversible.
+    assert policy.requires_confirmation(REVERSIBLE, "owner", cross_system=True) is True
+    assert (
+        policy.requires_confirmation(
+            REVERSIBLE, "owner", cross_system=True, trusted=True
+        )
+        is False
+    )
+    assert (
+        policy.requires_confirmation(
+            REVERSIBLE, "scheduler", cross_system=True, trusted=True
+        )
+        is False
+    )
+    # Never destructive and never external content, trusted or not.
+    assert (
+        policy.requires_confirmation(
+            DESTRUCTIVE, "owner", cross_system=True, trusted=True
+        )
+        is True
+    )
+    assert (
+        policy.requires_confirmation(
+            REVERSIBLE, "external", cross_system=True, trusted=True
+        )
+        is True
+    )
+
+
+# ---------------------------------------------------------------------------
+# The autonomy dial: WorkflowTrust
+# ---------------------------------------------------------------------------
+
+
+def make_trust(threshold: int) -> tuple[WorkflowTrust, MemoryStore]:
+    store = MemoryStore()
+    return WorkflowTrust(store, FakeClock(), threshold=threshold), store
+
+
+async def test_trust_is_earned_exactly_at_the_threshold():
+    trust, _ = make_trust(3)
+    workflow = ("training", "calendar.create_event")
+
+    assert await trust.is_trusted(*workflow) is False
+    assert await trust.record_approval(*workflow) == (1, False)
+    assert await trust.record_approval(*workflow) == (2, False)
+    assert await trust.is_trusted(*workflow) is False
+    assert await trust.record_approval(*workflow) == (3, True)
+    assert await trust.is_trusted(*workflow) is True
+    # Later approvals keep counting but never re-announce the crossing.
+    assert await trust.record_approval(*workflow) == (4, False)
+
+
+async def test_threshold_zero_records_but_never_trusts():
+    trust, _ = make_trust(0)
+
+    assert await trust.record_approval("training", "t") == (1, False)
+    assert await trust.is_trusted("training", "t") is False
+
+
+async def test_reset_zeroes_the_run_and_audits_both_directions():
+    trust, store = make_trust(2)
+    await trust.record_approval("training", "t")
+    await trust.record_approval("training", "t")
+    assert await trust.is_trusted("training", "t") is True
+
+    await trust.reset("training", "t", cause="denied")
+
+    assert await trust.is_trusted("training", "t") is False
+    events = [r["event"] for r in await store.query(Collections.AUDIT)]
+    assert "workflow_trusted" in events
+    assert "workflow_trust_reset" in events
+
+
+async def test_trust_is_per_workflow_never_shared():
+    trust, _ = make_trust(1)
+    await trust.record_approval("training", "calendar.create_event")
+
+    assert await trust.is_trusted("training", "calendar.create_event") is True
+    # Neither another agent on the same tool nor the same agent on another
+    # tool inherits anything.
+    assert await trust.is_trusted("study", "calendar.create_event") is False
+    assert await trust.is_trusted("training", "vault.write_note") is False
 
 
 # ---------------------------------------------------------------------------

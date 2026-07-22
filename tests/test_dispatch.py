@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from alfred.domain.dispatch import DispatchOutcome, ToolDispatcher
-from alfred.domain.governance import PendingActions, Policy
+from alfred.domain.governance import PendingActions, Policy, WorkflowTrust
 from alfred.domain.registry import LoadedAgent
 from alfred.domain.schemas import AgentManifest, Collections, ToolCall
 from alfred.errors import AlfredError, ToolNotAllowedError, ToolNotFoundError
@@ -30,7 +30,10 @@ def make_agent(name: str = "trainer", allowed: list[str] | None = None) -> Loade
 
 
 def make_dispatcher(
-    *, auto_approve_reversible: bool = True, dry_run_cross_system: bool = True
+    *,
+    auto_approve_reversible: bool = True,
+    dry_run_cross_system: bool = True,
+    trust_after_approvals: int = 0,
 ) -> tuple[ToolDispatcher, FakeTools, MemoryStore, FakeClock, PendingActions]:
     tools = FakeTools()
     tools.add(READ_TOOL, tier=CapabilityTier.READ_ONLY)
@@ -47,7 +50,8 @@ def make_dispatcher(
         auto_approve_reversible=auto_approve_reversible,
         dry_run_cross_system=dry_run_cross_system,
     )
-    dispatcher = ToolDispatcher(tools, store, clock, policy, pending)
+    trust = WorkflowTrust(store, clock, threshold=trust_after_approvals)
+    dispatcher = ToolDispatcher(tools, store, clock, policy, pending, trust=trust)
     return dispatcher, tools, store, clock, pending
 
 
@@ -334,3 +338,73 @@ async def test_audit_trail_records_expected_events_in_order():
         "pending_action_resolved",
         "tool_executed",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The autonomy dial at dispatch time
+# ---------------------------------------------------------------------------
+
+
+async def test_trusted_workflow_skips_the_preview_and_the_audit_says_so():
+    dispatcher, tools, store, clock, _ = make_dispatcher(trust_after_approvals=1)
+    await WorkflowTrust(store, clock, 1).record_approval("trainer", MCP_WRITE_TOOL)
+
+    outcome = await dispatcher.dispatch(
+        make_agent(), ToolCall(tool=MCP_WRITE_TOOL), "owner"
+    )
+
+    assert outcome.pending is None
+    assert outcome.result is not None and outcome.result.ok
+    assert tools.invocations == [(MCP_WRITE_TOOL, {})]
+    executed = [
+        r
+        for r in await store.query(Collections.AUDIT)
+        if r["event"] == "tool_executed"
+    ]
+    assert executed[-1].get("trusted_workflow") is True
+
+
+async def test_external_content_never_rides_earned_trust():
+    dispatcher, tools, store, clock, _ = make_dispatcher(trust_after_approvals=1)
+    await WorkflowTrust(store, clock, 1).record_approval("trainer", MCP_WRITE_TOOL)
+
+    outcome = await dispatcher.dispatch(
+        make_agent(), ToolCall(tool=MCP_WRITE_TOOL), "external"
+    )
+
+    assert outcome.pending is not None
+    assert tools.invocations == []
+
+
+async def test_destructive_cross_system_never_relaxes_even_when_trusted():
+    dispatcher, tools, store, clock, _ = make_dispatcher(trust_after_approvals=1)
+    tools.add(
+        "calendar.delete_event",
+        tier=CapabilityTier.DESTRUCTIVE,
+        source="mcp:calendar",
+    )
+    agent = make_agent(allowed=ALL_TOOLS + ["calendar.delete_event"])
+    await WorkflowTrust(store, clock, 1).record_approval(
+        "trainer", "calendar.delete_event"
+    )
+
+    outcome = await dispatcher.dispatch(
+        agent, ToolCall(tool="calendar.delete_event"), "owner"
+    )
+
+    assert outcome.pending is not None
+    assert tools.invocations == []
+
+
+async def test_dial_off_means_no_trust_whatever_the_ledger_says():
+    dispatcher, tools, store, clock, _ = make_dispatcher(trust_after_approvals=0)
+    ledger = WorkflowTrust(store, clock, 5)
+    for _ in range(10):
+        await ledger.record_approval("trainer", MCP_WRITE_TOOL)
+
+    outcome = await dispatcher.dispatch(
+        make_agent(), ToolCall(tool=MCP_WRITE_TOOL), "owner"
+    )
+
+    assert outcome.pending is not None
+    assert tools.invocations == []

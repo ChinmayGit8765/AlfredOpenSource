@@ -20,7 +20,7 @@ from alfred.domain.conductor import Conductor
 from alfred.domain.dispatch import ToolDispatcher
 from alfred.domain.executor import AgentExecutor
 from alfred.domain.feedback import adherence_signal, parse_outcome_report
-from alfred.domain.governance import PendingActions, Proposals, audit
+from alfred.domain.governance import PendingActions, Proposals, WorkflowTrust, audit
 from alfred.domain.lifecycle import LapseDoctor, lapse_proposal
 from alfred.domain.memory import MemoryService
 from alfred.domain.reflection import ReflectionEngine
@@ -50,6 +50,7 @@ from alfred.domain.schemas import (
 from alfred.domain.user_model import UserModelService
 from alfred.errors import AlfredError
 from alfred.ports import ClockPort, OutboundMessage, StorePort, TransportPort
+from alfred.ports.tools import CapabilityTier
 from alfred.runtime.agent_loader import materialise_agent, render_manifest_yaml
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,8 @@ _HELP_TEXT = "\n".join(
         "- pending: list gated tool actions awaiting your confirmation",
         "- confirm <id> / deny <id>: rule on a gated action, or on a whole",
         "  composed intent at once when several actions share one intent id",
+        "- trust: the autonomy dial and every workflow's standing",
+        "- distrust <agent> <tool>: make one workflow preview again",
         "- proposals: list pending self-change proposals",
         "- approve <id> [confirm-safety] / reject <id>: rule on a proposal",
         "- reflect: run a strategy review now",
@@ -116,6 +119,7 @@ class AlfredCore:
         agents_dir: Path,
         memory: MemoryService | None = None,
         skipped_agents: list[tuple[str, str]] | None = None,
+        trust: WorkflowTrust | None = None,
     ) -> None:
         self._registry = registry
         self._executor = executor
@@ -134,6 +138,8 @@ class AlfredCore:
         self._config = config
         self._agents_dir = Path(agents_dir)
         self._memory = memory or MemoryService(store, clock)
+        # Threshold 0 when nothing is wired: the dial exists but is off.
+        self._trust = trust or WorkflowTrust(store, clock, threshold=0)
         # Folders that failed to load at startup: shown in 'agents' and
         # 'status' so a version rollback can never silently unload agents.
         self._skipped_agents = list(skipped_agents or [])
@@ -409,6 +415,26 @@ class AlfredCore:
                 await self._send(
                     channel,
                     "Usage: reject <id>. Say 'proposals' to see what is pending.",
+                )
+            return True
+        if lowered == "trust":
+            await self._send(channel, await self._render_trust())
+            return True
+        if head == "distrust":
+            # Reserved at any arity for the same reason as confirm/deny: a
+            # mistyped revocation must never leak into agent routing.
+            if len(parts) == 3:
+                await self._trust.reset(parts[1], parts[2], cause="owner distrust")
+                await self._send(
+                    channel,
+                    f"Done: {parts[1]} calling {parts[2]} starts from zero "
+                    "and previews again.",
+                )
+            else:
+                await self._send(
+                    channel,
+                    "Usage: distrust <agent> <tool>. Say 'trust' to see the "
+                    "workflows on record.",
                 )
             return True
 
@@ -694,11 +720,14 @@ class AlfredCore:
             await self._send(channel, f"Could not execute {action_id}: {exc}")
             return
         if result.ok:
-            await self._send(
-                channel,
+            text = (
                 f"Confirmed {action_id}: {action.call.tool} executed. "
-                f"Result: {result.model_dump_json()}",
+                f"Result: {result.model_dump_json()}"
             )
+            note = await self._note_trust_approval(action)
+            if note:
+                text += f"\n{note}"
+            await self._send(channel, text)
         else:
             await self._send(
                 channel,
@@ -732,6 +761,9 @@ class AlfredCore:
                 break
             if result.ok:
                 lines.append(f"{step}. {member.call.tool}: done")
+                note = await self._note_trust_approval(member)
+                if note:
+                    lines.append(note)
                 continue
             lines.append(f"{step}. {member.call.tool}: failed ({result.error})")
             remaining = members[step:]
@@ -754,6 +786,9 @@ class AlfredCore:
         if members:
             for member in members:
                 await self._pending.resolve(member.id, approved=False)
+                await self._trust.reset(
+                    member.agent, member.call.tool, cause="denied"
+                )
             tools = ", ".join(m.call.tool for m in members)
             await self._send(
                 channel,
@@ -765,10 +800,71 @@ class AlfredCore:
         except AlfredError as exc:
             await self._send(channel, f"Could not deny {action_id}: {exc}")
             return
+        # Any deny zeroes the pair's run toward the autonomy dial: distrust
+        # is always cheaper than trust.
+        await self._trust.reset(action.agent, action.call.tool, cause="denied")
         await self._send(
             channel,
             f"Denied {action_id}: {action.call.tool} will not run.",
         )
+
+    async def _note_trust_approval(self, action: PendingAction) -> str | None:
+        """Count one confirm toward the dial; a line only when it matters.
+
+        Only previewed cross-system reversible writes feed trust: a
+        destructive confirm can never relax anything, and external content
+        never gets counted at all.
+        """
+        if (
+            action.tier != CapabilityTier.REVERSIBLE_WRITE
+            or not action.cross_system
+            or action.provenance == "external"
+        ):
+            return None
+        approvals, newly = await self._trust.record_approval(
+            action.agent, action.call.tool
+        )
+        if not newly:
+            return None
+        return (
+            f"That is {approvals} approvals in a row for {action.agent} "
+            f"calling {action.call.tool}, so I will stop previewing this "
+            f"workflow. Say 'distrust {action.agent} {action.call.tool}' any "
+            "time to bring the preview back."
+        )
+
+    async def _render_trust(self) -> str:
+        threshold = self._trust.threshold
+        lines: list[str] = []
+        if threshold <= 0:
+            lines.append(
+                "The autonomy dial is off: every cross-system write previews, "
+                "always. Set policy.trust_after_approvals in config/alfred.yaml "
+                "to let a workflow earn its way out of the preview."
+            )
+        else:
+            lines.append(
+                f"The autonomy dial is set to {threshold}: a workflow you "
+                f"approve {threshold} times in a row stops previewing. A deny "
+                "resets it; 'distrust <agent> <tool>' revokes it."
+            )
+        live = [r for r in await self._trust.all_records() if r.approvals > 0]
+        if not live:
+            lines.append("No workflow has approvals on record yet.")
+            return "\n".join(lines)
+        for record in live:
+            if threshold > 0 and record.approvals >= threshold:
+                lines.append(
+                    f"- {record.agent} calling {record.tool}: trusted "
+                    f"({record.approvals} approvals); previews skipped"
+                )
+            else:
+                target = f" of {threshold}" if threshold > 0 else ""
+                lines.append(
+                    f"- {record.agent} calling {record.tool}: "
+                    f"{record.approvals}{target} approvals"
+                )
+        return "\n".join(lines)
 
     async def _approve_proposal(
         self, channel: str, proposal_id: str, confirm_safety: bool

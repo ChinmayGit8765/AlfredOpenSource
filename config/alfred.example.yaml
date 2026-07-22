@@ -142,13 +142,25 @@ policy:
   # When true, any write that reaches an external system (a tool from an
   # MCP server, not a built-in local tool) is previewed for your
   # confirmation before it runs, even if its tier would auto-approve. This
-  # is the "dry run until trusted" gate: set it false once you trust a
-  # connected workflow to act without a preview. Read-only cross-system
-  # calls are never gated by this. Default: true
+  # is the "dry run until trusted" gate. Read-only cross-system calls are
+  # never gated by this. Prefer trust_after_approvals below over setting
+  # this false: the dial relaxes one workflow at a time, this switch
+  # relaxes everything at once. Default: true
   dry_run_cross_system: true
 
   # Hours before an unconfirmed pending action expires. Default: 24
   pending_action_ttl_hours: 24
+
+  # The autonomy dial. 0 (the default) means no workflow ever earns its
+  # way out of the dry-run preview. A positive N lets ONE workflow (one
+  # agent calling one tool, e.g. training calling calendar.create-event)
+  # skip the preview after you have confirmed it N times in a row; ALFRED
+  # announces the crossing when it happens. A single deny resets that
+  # workflow to zero, and 'distrust <agent> <tool>' in chat revokes it any
+  # time. Destructive tools and externally-triggered content never relax,
+  # whatever this is set to. Say 'trust' in chat to see every workflow's
+  # standing. Default: 0
+  trust_after_approvals: 0
 
 # MCP servers (the phase 6 action layer). Empty in v1. When you are ready
 # to connect one, see config/mcp.example.yaml for the block format and how
