@@ -16,7 +16,7 @@ service later without touching any caller.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from alfred.domain.schemas import Collections, Memory, load_or_none
@@ -35,7 +35,7 @@ _STOPWORDS = frozenset(
     """.split()
 )
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def tokenize(text: str) -> set[str]:

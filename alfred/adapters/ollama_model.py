@@ -135,7 +135,7 @@ class OllamaModelAdapter:
                 f"is the Ollama server running? ({exc})"
             ) from exc
 
-        available = [m.model for m in listing.models if m.model]
+        available: list[str] = [m.model for m in listing.models if m.model]
         for wanted in [self._config.name, *self._config.fallbacks]:
             resolved = next(
                 (name for name in available if _matches(wanted, name)), None

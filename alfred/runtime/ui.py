@@ -95,7 +95,9 @@ def lifecycle_text(state: Lifecycle) -> Text:
 def print_banner(subtitle: str = "") -> None:
     """The masthead: banner, tagline, optional mode line."""
     console.print()
-    for row, colour in zip(_BANNER_ROWS, _BANNER_FADE):
+    # strict: a banner and a fade of different lengths is an editing slip,
+    # and a silently truncated masthead is harder to notice than a crash.
+    for row, colour in zip(_BANNER_ROWS, _BANNER_FADE, strict=True):
         console.print(Text(row, style=colour), justify="left")
     meta = Text()
     meta.append(f"v{alfred.__version__}", style="accent")
@@ -151,7 +153,7 @@ def agents_table(agents: list[LoadedAgent]) -> Table:
     for agent in agents:
         manifest = agent.manifest
         schedule = manifest.schedule
-        when = schedule.kind
+        when: str = schedule.kind
         if schedule.kind in ("daily", "weekly") and schedule.time:
             days = ",".join(schedule.days) + " " if schedule.days else ""
             when = f"{schedule.kind} {days}{schedule.time}"

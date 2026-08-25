@@ -10,7 +10,6 @@ never trusted as structured data anywhere else in the system.
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -18,8 +17,6 @@ from alfred.errors import StructuredCallError
 from alfred.ports.model import ModelMessage, ModelOptions, ModelPort
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T", bound=BaseModel)
 
 _RETRY_TEMPLATE = (
     "Your previous reply did not match the required JSON schema.\n"
@@ -72,7 +69,7 @@ def extract_json(text: str) -> str:
     raise ValueError("unterminated JSON object in model output")
 
 
-async def structured_call(
+async def structured_call[T: BaseModel](
     model: ModelPort,
     *,
     schema: type[T],

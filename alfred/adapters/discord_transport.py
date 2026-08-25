@@ -16,18 +16,17 @@ from datetime import datetime
 
 import discord
 
+from alfred.adapters.textutil import chunk_text
 from alfred.config import DiscordConfig
 from alfred.domain.schemas import InboundMessage
 from alfred.errors import TransportError
 from alfred.ports.transport import OutboundMessage
 
-from alfred.adapters.textutil import chunk_text
-
 logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 
-__all__ = ["DiscordTransportAdapter", "DISCORD_MESSAGE_LIMIT", "chunk_text"]
+__all__ = ["DISCORD_MESSAGE_LIMIT", "DiscordTransportAdapter", "chunk_text"]
 
 
 class DiscordTransportAdapter:

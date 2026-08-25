@@ -1,23 +1,35 @@
 # Python
+# Build-artefact patterns are anchored with a leading slash on purpose: an
+# unanchored "build/" also matches agents/build/, which silently kept the
+# shipped build agent out of the repo and turned CI red.
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
-build/
-dist/
+/build/
+/dist/
 .coverage
+coverage.xml
 htmlcov/
 
 # ALFRED local state (never commit the owner's data)
-data/
+/data/
 *.db
 *.db-wal
 *.db-shm
 .env
-config/alfred.yaml
-config/mcp.yaml
+/config/alfred.yaml
+/config/mcp.yaml
 agents/*/state/
+
+# Obsidian per-machine state (the vault's shared config is tracked)
+brain/.obsidian/workspace.json
+brain/.obsidian/workspace-mobile.json
+brain/.obsidian/cache
+brain/.trash/
 
 # OS
 .DS_Store

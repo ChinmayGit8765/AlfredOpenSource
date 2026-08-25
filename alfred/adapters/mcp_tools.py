@@ -90,9 +90,7 @@ def _is_transport_failure(exc: BaseException) -> bool:
             return True
     # mcp surfaces a dropped transport as McpError("Connection closed");
     # other McpErrors are per-call failures and leave the session alone.
-    if type(exc).__name__ == "McpError" and "connection closed" in str(exc).lower():
-        return True
-    return False
+    return type(exc).__name__ == "McpError" and "connection closed" in str(exc).lower()
 
 
 class _ServerState:
@@ -230,8 +228,11 @@ class McpToolAdapter:
             return state.session
         async with state.lock:
             if state.session is not None:
-                # Another task reconnected while we waited on the lock.
-                return state.session
+                # Another task reconnected while we waited on the lock. mypy
+                # narrows state.session to None from the check above and calls
+                # this dead; it cannot see the concurrent write, and this is
+                # the second half of a double-checked lock, not dead code.
+                return state.session  # type: ignore[unreachable]
             now = self._monotonic()
             if (
                 state.last_attempt is not None

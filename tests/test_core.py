@@ -40,7 +40,13 @@ from alfred.ports.tools import CapabilityTier
 from alfred.runtime.agent_loader import materialise_agent
 from alfred.runtime.composition import build_system
 from alfred.runtime.core import AlfredCore
-from alfred.testing.fakes import CapturingTransport, FakeClock, FakeModel, FakeTools, MemoryStore
+from alfred.testing.fakes import (
+    CapturingTransport,
+    FakeClock,
+    FakeModel,
+    FakeTools,
+    MemoryStore,
+)
 
 REPO_AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
@@ -298,7 +304,7 @@ async def test_deny_rejects_pending_action(tmp_path: Path) -> None:
     assert any(f"Denied {action.id}" in t for t in sent_texts(world))
 
 
-def _two_write_world(tmp_path: Path, *, first_handler=None) -> "World":
+def _two_write_world(tmp_path: Path, *, first_handler=None) -> World:
     """A world whose agent proposes two gated writes in one reply."""
     tools = FakeTools()
     tools.add(

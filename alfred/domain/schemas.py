@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -22,17 +22,15 @@ from alfred.ports.tools import CapabilityTier
 
 logger = logging.getLogger(__name__)
 
-_ModelT = TypeVar("_ModelT", bound=BaseModel)
-
 
 def new_id() -> str:
     """Short unique id for domain objects. Not time-ordered; store keys are."""
     return uuid.uuid4().hex[:12]
 
 
-def load_or_none(
-    model: type[_ModelT], doc: Mapping[str, Any], *, source: str = ""
-) -> _ModelT | None:
+def load_or_none[ModelT: BaseModel](
+    model: type[ModelT], doc: Mapping[str, Any], *, source: str = ""
+) -> ModelT | None:
     """Validate one stored document, or None when it no longer parses.
 
     Stored rows outlive schema changes. Without this guard, one legacy row

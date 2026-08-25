@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from alfred.config import HeartbeatConfig
 from alfred.domain.registry import AgentRegistry, LoadedAgent
@@ -16,7 +16,7 @@ from alfred.domain.schemas import (
 from alfred.runtime.heartbeat import Heartbeat, in_quiet_hours
 from alfred.testing.fakes import FakeClock, MemoryStore
 
-MONDAY = datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)  # a Monday, 09:00
+MONDAY = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)  # a Monday, 09:00
 
 
 class RecordingRunner:
@@ -179,7 +179,7 @@ async def test_paused_and_retired_agents_get_no_jobs() -> None:
 
 def test_in_quiet_hours_window_logic() -> None:
     def at(hour: int, minute: int) -> datetime:
-        return datetime(2026, 1, 5, hour, minute, tzinfo=timezone.utc)
+        return datetime(2026, 1, 5, hour, minute, tzinfo=UTC)
 
     spec = "22:30-07:30"  # crosses midnight
     assert in_quiet_hours(at(23, 0), spec)
@@ -194,7 +194,7 @@ def test_in_quiet_hours_window_logic() -> None:
 
 
 async def test_quiet_hours_suppress_across_midnight() -> None:
-    clock = FakeClock(datetime(2026, 1, 5, 23, 0, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 1, 5, 23, 0, tzinfo=UTC))
     heartbeat, _, runner = build(
         [agent("pulse", kind="interval", every_minutes=30)],
         clock=clock,
@@ -220,9 +220,9 @@ async def test_daily_job_inside_quiet_hours_catches_up_after_midnight() -> None:
     await store.put(
         Collections.HEARTBEAT,
         "schedule:journal",
-        {"last": datetime(2026, 1, 4, 23, 0, tzinfo=timezone.utc).isoformat()},
+        {"last": datetime(2026, 1, 4, 23, 0, tzinfo=UTC).isoformat()},
     )
-    clock = FakeClock(datetime(2026, 1, 5, 23, 0, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 1, 5, 23, 0, tzinfo=UTC))
     heartbeat, _, runner = build(
         [agent("journal", kind="daily", time="23:00")],
         clock=clock,

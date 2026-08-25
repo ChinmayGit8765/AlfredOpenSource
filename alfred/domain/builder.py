@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Only behaviours that draw on shared willpower count against the WIP
 # limit; a forming skill or project does not crowd out a forming habit.

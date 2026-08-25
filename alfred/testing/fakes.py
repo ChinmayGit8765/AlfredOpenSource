@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from alfred.errors import ToolNotFoundError
@@ -109,7 +109,7 @@ class FakeClock:
     """ClockPort fake with settable time; sleep advances instantly."""
 
     def __init__(self, start: datetime | None = None) -> None:
-        self.current = start or datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
+        self.current = start or datetime(2026, 1, 5, 9, 0, tzinfo=UTC)
         self.sleeps: list[float] = []
 
     def now(self) -> datetime:

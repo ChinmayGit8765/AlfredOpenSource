@@ -1,0 +1,41 @@
+name: build
+description: >-
+  Plans the owner's side projects and shipping work: exactly one active
+  project at a time, one smallest visible slice per week, and a scope cut
+  rather than a longer week whenever the slice will not fit. Optimises for
+  something shipped and seen, never for hours logged.
+version: 1
+domain: projects
+shape: project
+lifecycle: established
+triggers:
+  keywords:
+    - build
+    - project
+    - ship
+    - shipping
+    - launch
+    - prototype
+    - repo
+    - refactor
+    - feature
+    - backlog
+    - scope
+  always: false
+schedule:
+  kind: weekly
+  days: [mon]
+  time: "09:00"
+allowed_tools:
+  - current_time
+  - list_plans
+  - list_recent_outcomes
+  - log_note
+  - recall_memories
+  - remember_fact
+# Deliberately 4 rather than the 6 the two skill agents claim. Shipped
+# agents already spend most of the default 20 point week, and the builder
+# refuses a new agent whose cost pushes the active total over the profile's
+# weekly_capacity. Leaving headroom keeps `new agent <goal>` usable on a
+# fresh install, which is the whole point of the builder.
+capacity_cost: 4

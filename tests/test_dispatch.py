@@ -383,7 +383,7 @@ async def test_destructive_cross_system_never_relaxes_even_when_trusted():
         tier=CapabilityTier.DESTRUCTIVE,
         source="mcp:calendar",
     )
-    agent = make_agent(allowed=ALL_TOOLS + ["calendar.delete_event"])
+    agent = make_agent(allowed=[*ALL_TOOLS, "calendar.delete_event"])
     await WorkflowTrust(store, clock, 1).record_approval(
         "trainer", "calendar.delete_event"
     )

@@ -302,13 +302,11 @@ async def _cmd_run(config_path: str | None) -> int:
     if isinstance(system.transport, SwitchableTransport):
         system.transport.inner = MultiTransport(routes)
 
-    async def watch_stop() -> None:
-        # The owner's kill switch: "alfred stop" in chat sets the flag and
-        # this watcher brings the whole service down.
-        while not system.core.stop_requested:
-            await asyncio.sleep(1)
-
-    tasks.append(asyncio.create_task(watch_stop(), name="stop-watch"))
+    # The owner's kill switch: "alfred stop" in chat sets the event and this
+    # watcher brings the whole service down, with no polling lag in between.
+    tasks.append(
+        asyncio.create_task(system.core.wait_for_stop(), name="stop-watch")
+    )
     if config.heartbeat.enabled:
         tasks.append(
             asyncio.create_task(system.heartbeat.run_forever(), name="heartbeat")
@@ -328,10 +326,10 @@ async def _cmd_run(config_path: str | None) -> int:
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
-            exc = task.exception()
-            if exc is None:
+            failure = task.exception()
+            if failure is None:
                 continue
-            name = type(exc).__name__
+            name = type(failure).__name__
             if name == "LoginFailure":
                 console.print(
                     "[bad]Discord rejected the bot token.[/] Check the "
@@ -340,9 +338,9 @@ async def _cmd_run(config_path: str | None) -> int:
             else:
                 console.print(
                     f"[bad]Service task {task.get_name()!r} failed[/] "
-                    f"({name}): {exc}"
+                    f"({name}): {failure}"
                 )
-            logger.error("service task %s failed: %s", task.get_name(), exc)
+            logger.error("service task %s failed: %s", task.get_name(), failure)
             exit_code = 1
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
@@ -423,7 +421,7 @@ def _mcp_check_lines(statuses: list[McpServerStatus]) -> list[tuple[str, str]]:
                 )
             )
             continue
-        counts = {tier: 0 for tier in CapabilityTier}
+        counts = dict.fromkeys(CapabilityTier, 0)
         for spec in server.specs:
             counts[spec.tier] += 1
         text = (

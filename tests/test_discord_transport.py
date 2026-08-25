@@ -6,13 +6,13 @@ started, and _handle_raw is exercised directly with plain values.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from alfred.adapters.discord_transport import DiscordTransportAdapter, chunk_text
 from alfred.config import DiscordConfig
 from alfred.domain.schemas import InboundMessage
 
-NOW = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
 OWNER = 1111
 CHANNEL = 2222
 

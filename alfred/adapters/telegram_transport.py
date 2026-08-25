@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -56,7 +56,7 @@ def to_inbound(update: dict[str, Any], owner_id: int) -> InboundMessage | None:
         return None
     at = None
     if isinstance(message.get("date"), int):
-        at = datetime.fromtimestamp(message["date"], tz=timezone.utc)
+        at = datetime.fromtimestamp(message["date"], tz=UTC)
     return InboundMessage(
         channel=f"{CHANNEL_PREFIX}{chat_id}",
         author=str(sender.get("id")),

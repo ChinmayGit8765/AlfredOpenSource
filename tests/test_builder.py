@@ -279,7 +279,7 @@ async def test_capacity_check_revises_to_fit() -> None:
     small["manifest"]["capacity_cost"] = 1
     small = json.dumps(small)
     builder, _, store = make_builder(
-        weekly_capacity=20, responses=list(HAPPY_SCRIPT) + [small]
+        weekly_capacity=20, responses=[*HAPPY_SCRIPT, small]
     )
     registry = AgentRegistry(
         [
@@ -321,7 +321,7 @@ async def test_revision_loop_stays_awaiting_and_applies_revision() -> None:
     revised = blueprint_json(
         name="phone-curfew", description="Two pages of paper book after brushing teeth."
     )
-    builder, model, store = make_builder(responses=list(HAPPY_SCRIPT) + [revised])
+    builder, model, store = make_builder(responses=[*HAPPY_SCRIPT, revised])
     registry = AgentRegistry()
     session_id, _ = await drive_to_approval(builder, registry)
 

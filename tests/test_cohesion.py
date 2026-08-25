@@ -16,7 +16,13 @@ from alfred.domain.schemas import AgentManifest, Collections, Plan, PlanItem
 from alfred.domain.user_model import UserModelService
 from alfred.ports.transport import OutboundMessage
 from alfred.runtime.composition import MultiTransport
-from alfred.testing import CapturingTransport, FakeClock, FakeModel, FakeTools, MemoryStore
+from alfred.testing import (
+    CapturingTransport,
+    FakeClock,
+    FakeModel,
+    FakeTools,
+    MemoryStore,
+)
 
 
 def reply_json(text: str = "ok") -> str:

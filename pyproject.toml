@@ -29,7 +29,14 @@ Issues = "https://github.com/ChinmayGit8765/AlfredOpenSource/issues"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
 
 [project.scripts]
 alfred = "alfred.runtime.cli:main"
@@ -45,3 +52,89 @@ packages = ["alfred"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# strict-markers and strict-config turn a typo in a marker or an unknown
+# ini key into a failure instead of a silently ignored line. filterwarnings
+# makes a DeprecationWarning from a dependency a test failure, which is how
+# a five second offline suite stays an early warning system.
+addopts = "--strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["alfred"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
+# The floor for the package as a whole. The domain and ports layers carry a
+# stricter floor, enforced separately in CI: pure logic has no excuse for
+# untested branches, while the CLI shell is exercised by hand.
+fail_under = 79
+
+[tool.ruff]
+# Longer than the 79 the prose in this repo wraps at, because a wrapped
+# call chain is harder to read than a slightly long line. Formatting is not
+# enforced (see docs/adr/0002 in the brain vault); linting is.
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "A",      # shadowing builtins
+    "ASYNC",  # async correctness: blocking calls, busy waits
+    "B",      # bugbear: real bug shapes
+    "C4",     # comprehension clarity
+    "DTZ",    # naive datetimes, which this codebase must never produce
+    "E",      # pycodestyle errors
+    "EXE",    # shebang and executable-bit mismatches
+    "F",      # pyflakes: undefined names, unused imports
+    "FURB",   # modernisation
+    "G",      # logging call shape
+    "I",      # import sorting
+    "ICN",    # conventional import aliases
+    "INT",    # gettext misuse
+    "ISC",    # implicit string concatenation
+    "LOG",    # logging misuse
+    "N",      # pep8 naming
+    "PERF",   # obvious performance traps
+    "PIE",    # miscellaneous lint
+    "PT",     # pytest style
+    "RET",    # return-path clarity
+    "RUF",    # ruff's own rules
+    "SIM",    # simplification
+    "SLOT",   # __slots__ correctness
+    "TID",    # tidy imports
+    "UP",     # pyupgrade
+    "W",      # pycodestyle warnings
+    "YTT",    # sys.version misuse
+]
+ignore = [
+    "E501",    # line length is a formatter concern, not a review blocker
+    "RUF001",  # the CLI deliberately prints non-ASCII glyphs
+    "PERF401", # an explicit loop is often the clearer one here
+    "SIM905", # a wrapped .split() word list reads better than a long literal
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, reach into privates, and build composite assertions on
+# purpose; a dev script prints because printing is its output.
+"tests/*" = ["PT018", "PT011", "ASYNC240", "RUF059"]
+"scripts/*" = ["T201"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["alfred"]
+# Fail loudly on a silently untyped dependency rather than letting Any leak
+# through the ports and hollow out strict mode from the edges.
+warn_unreachable = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Optional extra: absent in the base install, and its absence must not turn
+# a typecheck run into an import error.
+module = ["mcp.*"]
+ignore_missing_imports = true
