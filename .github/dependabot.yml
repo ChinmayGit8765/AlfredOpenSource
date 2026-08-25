@@ -1,0 +1,24 @@
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine patch churn, individual PRs for anything
+      # that can actually change behaviour. A dependency list this short is
+      # meant to be reviewed, not rubber-stamped.
+      patch-updates:
+        update-types: ["patch"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"

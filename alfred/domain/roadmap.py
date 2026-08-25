@@ -11,6 +11,7 @@ whole mountain, and never use streaks or shame for pressure.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from alfred.domain.schemas import Collections, Milestone, Roadmap, Win, load_or_none
 from alfred.domain.structured import structured_call
@@ -216,5 +217,5 @@ class RoadmapService:
         )
 
 
-def _without_key(doc: dict) -> dict:
+def _without_key(doc: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in doc.items() if k != "_key"}

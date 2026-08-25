@@ -58,7 +58,7 @@ def main() -> None:
     )
 
     console.print()
-    for row, colour in zip(BANNER, FADE):
+    for row, colour in zip(BANNER, FADE, strict=True):
         console.print(Text(row, style=colour))
     console.print(
         Text("v0.1.0", style="accent")

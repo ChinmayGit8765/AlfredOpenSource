@@ -8,6 +8,8 @@ filters what it is given.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ValidationError
 
 from alfred.domain.schemas import AgentManifest, Lifecycle
@@ -49,7 +51,7 @@ class AgentRegistry:
         return self._agents.pop(name, None) is not None
 
 
-def parse_manifest(raw: dict) -> AgentManifest:
+def parse_manifest(raw: dict[str, Any]) -> AgentManifest:
     """Validate raw manifest data, converting pydantic noise to a clear error."""
     try:
         return AgentManifest.model_validate(raw)

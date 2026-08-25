@@ -1,0 +1,23 @@
+# Every change gets an owner's eye. The layered directories are listed
+# explicitly so a PR that quietly reaches across an architectural boundary
+# is visible in the reviewer list, not just in the diff.
+
+*                       @ChinmayGit8765
+
+# The load-bearing contracts. A change here changes what the whole system
+# is allowed to do.
+/ARCHITECTURE.md        @ChinmayGit8765
+/docs/SPEC.md           @ChinmayGit8765
+/docs/GOVERNANCE.md     @ChinmayGit8765
+/SECURITY.md            @ChinmayGit8765
+
+# The gate itself, and the tests that prove it holds.
+/alfred/domain/dispatch.py       @ChinmayGit8765
+/alfred/domain/governance.py     @ChinmayGit8765
+/alfred/runtime/composition.py   @ChinmayGit8765
+/tests/test_architecture.py      @ChinmayGit8765
+/tests/test_governance.py        @ChinmayGit8765
+
+# Supply chain.
+/pyproject.toml         @ChinmayGit8765
+/.github/               @ChinmayGit8765

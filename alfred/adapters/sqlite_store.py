@@ -16,7 +16,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -53,7 +53,7 @@ class SqliteStoreAdapter:
             raise StoreError(f"failed to open sqlite store at {self._path}: {exc}") from exc
         self._lock = asyncio.Lock()
 
-    async def _run(self, fn: Callable[[], Any]) -> Any:
+    async def _run[T](self, fn: Callable[[], T]) -> T:
         async with self._lock:
             try:
                 return await asyncio.to_thread(fn)
@@ -63,7 +63,7 @@ class SqliteStoreAdapter:
     @staticmethod
     def _now_iso() -> str:
         # Adapter layer is the I/O boundary; wall clock is fine here.
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     @staticmethod
     def _decode_doc(raw: str, key: str) -> dict[str, Any] | None:

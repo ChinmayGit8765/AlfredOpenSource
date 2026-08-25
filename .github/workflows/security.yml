@@ -1,0 +1,58 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # A dependency that was clean on Monday can have a CVE by Thursday, and
+    # nobody pushes to a personal system every day. Weekly, Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: |
+          uv pip install -e ".[dev,mcp]" --system
+          uv pip install pip-audit --system
+      - name: Audit installed dependencies
+        # A self-hosted system holding one person's whole life is only as
+        # trustworthy as its smallest transitive dependency.
+        run: pip-audit --strict --progress-spinner=off
+
+  codeql:
+    name: codeql
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v3
+
+  secrets:
+    name: no secrets in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks diffs history, so it needs more than the tip commit.
+          fetch-depth: 0
+      - name: Scan for committed credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -15,10 +15,10 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -173,7 +173,7 @@ class McpSlot:
         return await self.inner.invoke(name, args)
 
 
-_DRY_RUN_REPLY = {
+_DRY_RUN_REPLY: dict[str, Any] = {
     "reply": (
         "This is dry-run mode: no local model is connected, so I cannot "
         "produce real plans or use tools. Commands, routing, and governance "
@@ -252,7 +252,7 @@ def _zero_value(prop: Mapping[str, Any], defs: Mapping[str, Any]) -> Any:
     """Type-appropriate zero value for one schema property, top level only."""
     if "$ref" in prop:
         prop = defs.get(str(prop["$ref"]).rsplit("/", 1)[-1], {})
-    if "enum" in prop and prop["enum"]:
+    if prop.get("enum"):
         return prop["enum"][0]
     if "anyOf" in prop:
         options = prop["anyOf"]

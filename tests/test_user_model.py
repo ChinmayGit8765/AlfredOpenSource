@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -140,7 +140,7 @@ async def test_record_outcome_stamps_at_only_when_missing(
     service: UserModelService, clock: FakeClock
 ) -> None:
     await service.record_outcome(Outcome(agent="training", status=OutcomeStatus.DONE))
-    explicit = datetime(2025, 12, 31, 8, 0, tzinfo=timezone.utc)
+    explicit = datetime(2025, 12, 31, 8, 0, tzinfo=UTC)
     await service.record_outcome(
         Outcome(agent="training", status=OutcomeStatus.MISSED, at=explicit)
     )

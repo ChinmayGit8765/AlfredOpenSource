@@ -142,6 +142,29 @@ def _schedule_problem(schedule: Schedule) -> str | None:
     return None
 
 
+def _schedule_predicate(schedule: Schedule) -> _DuePredicate:
+    """Bind one schedule into a due-ness predicate.
+
+    A closure rather than the default-argument lambda trick: both capture
+    the loop variable correctly, but only this form carries a signature a
+    type checker can verify against _DuePredicate.
+    """
+
+    def due(now: datetime, last: datetime | None) -> bool:
+        return _schedule_due(schedule, now, last)
+
+    return due
+
+
+def _interval_predicate(every: timedelta) -> _DuePredicate:
+    """Bind one interval into a due-ness predicate. See _schedule_predicate."""
+
+    def due(now: datetime, last: datetime | None) -> bool:
+        return last is None or now - last >= every
+
+    return due
+
+
 @dataclass(frozen=True)
 class _Job:
     """One potential firing: identity plus a pure due-ness predicate.
@@ -225,9 +248,7 @@ class Heartbeat:
                             job_id=f"schedule:{manifest.name}",
                             agent=manifest.name,
                             reason="schedule",
-                            due=lambda now, last, s=manifest.schedule: _schedule_due(
-                                s, now, last
-                            ),
+                            due=_schedule_predicate(manifest.schedule),
                             schedule=manifest.schedule,
                         )
                     )
@@ -238,8 +259,7 @@ class Heartbeat:
                         job_id=f"check_in:{manifest.name}",
                         agent=manifest.name,
                         reason="check_in",
-                        due=lambda now, last, iv=interval: last is None
-                        or now - last >= iv,
+                        due=_interval_predicate(interval),
                         every=interval,
                     )
                 )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from alfred.domain.dispatch import ToolDispatcher
@@ -15,7 +15,6 @@ from alfred.domain.schemas import (
     Collections,
     Plan,
     PlanItem,
-    ToolCall,
 )
 from alfred.domain.user_model import UserModelService
 from alfred.ports.model import ModelMessage, ModelOptions
@@ -98,7 +97,7 @@ async def test_plan_is_stamped_persisted_and_week_of_defaults_to_monday():
     plan = Plan(items=[PlanItem(title="run 5k", day="wed", load=2)])
     model = FakeModel([reply_json(reply="here is your plan", plan=plan.model_dump(mode="json"))])
     # A Wednesday; the Monday of that week is 2026-01-05.
-    clock = FakeClock(datetime(2026, 1, 7, 10, 0, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 1, 7, 10, 0, tzinfo=UTC))
     executor, store, _, _ = make_executor(model, clock=clock)
 
     result = await executor.run(make_agent(), text="plan my week", provenance="owner")

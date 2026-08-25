@@ -5,8 +5,36 @@ on:
     branches: [main]
   pull_request:
 
+# A second push to a PR cancels the first run: nobody needs the results of
+# a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
+  # Lint and types run once on one interpreter. They are platform
+  # independent, so paying for them nine times over the matrix buys
+  # nothing but a slower red signal.
+  static:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: uv pip install -e ".[dev,mcp]" --system
+      - name: Lint
+        run: ruff check .
+      - name: Types
+        run: mypy
+
   test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +49,33 @@ jobs:
       - name: Install
         run: uv pip install -e ".[dev,mcp]" --system
       - name: Test (fully offline)
-        run: python -m pytest -q
+        run: python -m pytest -q --cov --cov-report=term-missing
+      - name: Domain and ports coverage floor
+        # Pure logic has no excuse for untested branches. The package-wide
+        # floor in pyproject.toml is deliberately lower, because the CLI
+        # shell is exercised by hand.
+        run: >-
+          python -m coverage report
+          --include="alfred/domain/*,alfred/ports/*"
+          --fail-under=93
       - name: Offline smoke
         run: python -m alfred.runtime.cli demo-roundtrip --fake
+
+  build:
+    name: package builds and installs clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Build wheel and sdist
+        run: uv build
+      - name: Install the wheel into a clean environment
+        # Catches the packaging mistakes the editable install hides: a
+        # module missing from the wheel, or a console script that does not
+        # actually resolve once installed.
+        run: |
+          uv venv /tmp/wheel-check
+          uv pip install --python /tmp/wheel-check dist/*.whl
+          /tmp/wheel-check/bin/alfred --help

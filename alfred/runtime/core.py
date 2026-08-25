@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from alfred.config import AlfredConfig
@@ -151,12 +151,32 @@ class AlfredCore:
         # channels can no longer execute a gated tool twice. Throughput is a
         # non-goal for a single-owner system; coherence is the point.
         self._handler_lock = asyncio.Lock()
-        self.stop_requested = False
+        # An Event rather than a bare bool so the service supervisor can
+        # await the kill switch instead of polling it once a second. The
+        # stop_requested property below keeps the old attribute contract.
+        self._stop_event = asyncio.Event()
         # Freshest channel the owner spoke on; scheduled output goes there
         # when no channel is configured. In-memory on purpose: a stale "cli"
         # channel from a previous chat session must not capture Discord-mode
         # proactive sends.
         self._last_channel: str | None = None
+
+    # --- shutdown -------------------------------------------------------
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_event.is_set()
+
+    @stop_requested.setter
+    def stop_requested(self, requested: bool) -> None:
+        if requested:
+            self._stop_event.set()
+        else:
+            self._stop_event.clear()
+
+    async def wait_for_stop(self) -> None:
+        """Block until the owner's kill switch is pulled."""
+        await self._stop_event.wait()
 
     # --- entry points ---------------------------------------------------
 
@@ -1255,9 +1275,12 @@ class AlfredCore:
                 continue
         if not plans:
             return None
-        dated = [p for p in plans if p.created_at is not None]
+        # Pair the timestamp with the plan rather than reaching back through
+        # a sentinel: datetime.min is naive, and comparing it against an
+        # aware created_at would raise rather than sort.
+        dated = [(p.created_at, p) for p in plans if p.created_at is not None]
         if dated:
-            return max(dated, key=lambda p: p.created_at or datetime.min)
+            return max(dated, key=lambda pair: pair[0])[1]
         return plans[0]
 
     # --- rendering ------------------------------------------------------------

@@ -47,7 +47,9 @@ TRUTH_TABLE = [
 ]
 
 
-@pytest.mark.parametrize("tier,provenance,auto_approve,expected", TRUTH_TABLE)
+@pytest.mark.parametrize(
+    ("tier", "provenance", "auto_approve", "expected"), TRUTH_TABLE
+)
 def test_policy_truth_table(tier, provenance, auto_approve, expected):
     policy = Policy(auto_approve_reversible=auto_approve)
     assert policy.requires_confirmation(tier, provenance) is expected
@@ -302,11 +304,11 @@ async def test_resolve_stale_action_expires_and_raises():
 
 
 def make_proposal(**overrides) -> Proposal:
-    defaults = dict(
-        kind=ProposalKind.PROMPT_CHANGE,
-        agent="trainer",
-        summary="tweak tone",
-    )
+    defaults = {
+        "kind": ProposalKind.PROMPT_CHANGE,
+        "agent": "trainer",
+        "summary": "tweak tone",
+    }
     defaults.update(overrides)
     return Proposal(**defaults)
 

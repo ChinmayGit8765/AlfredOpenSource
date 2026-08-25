@@ -1,0 +1,69 @@
+name: Bug report
+description: Something behaves differently from what ARCHITECTURE.md or docs/SPEC.md says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you paste anything: your logs and config can contain memories,
+        plans, tokens, and channel ids. Redact them. Nothing in this form
+        needs your real data to be useful.
+
+        If the bug lets someone read owner data or run a tool without
+        confirmation, do not file it here. Use the Security tab and report a
+        vulnerability privately (see SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >-
+        Smallest sequence that shows it. `chat --fake` reproductions are
+        worth ten times a real-model one, because everyone can run them.
+      placeholder: |
+        1. python -m alfred.runtime.cli chat --fake
+        2. type: goal run a half marathon
+        3. type: next
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - chat --fake (no services)
+        - chat (Ollama)
+        - run (Ollama plus a transport)
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Python version
+      placeholder: "Windows 11, Python 3.13"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Redacted. This is rendered as code, no backticks needed.
+      render: text
