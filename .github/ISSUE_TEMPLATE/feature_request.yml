@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a capability, an agent, or a connector
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ALFRED is small on purpose. The best proposals make it more useful
+        without making it bigger, and the best of those are an agent folder
+        or an MCP recipe, which need no code at all.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What does the owner's life look like today, and what goes wrong?
+        Describe the situation, not the feature.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: What shape is this
+      options:
+        - A new agent folder (manifest plus prompt, no code)
+        - An MCP connector recipe
+        - A change to an existing agent's prompt
+        - A change to the runtime or domain logic
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: fit
+    attributes:
+      label: How it fits the contracts
+      description: >-
+        If it needs code: which layer owns it, which port it goes through,
+        and what capability tier any new tool carries. See ARCHITECTURE.md
+        and docs/GOVERNANCE.md.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you already tried or considered

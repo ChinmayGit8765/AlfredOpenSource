@@ -1,0 +1,52 @@
+# Local gates, same rules as CI, so a red build is something you already
+# saw. Install once with: pre-commit install
+#
+# Deliberately not here: a formatter. This repo's line breaking is chosen
+# by hand and a formatter would rewrite most of it for no correctness gain.
+# ruff lints; it does not reformat.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: detect-private-key
+      # The owner's data must never reach a commit, and .gitignore already
+      # excludes it. This catches a git add -f that meant well.
+      - id: forbid-submodules
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
+    hooks:
+      - id: mypy
+        # mypy needs the real dependency types, not an isolated env, or it
+        # reports import errors that CI will not.
+        additional_dependencies:
+          - pydantic>=2.7
+          - types-PyYAML>=6.0
+        args: [--strict]
+        files: ^alfred/
+
+  - repo: local
+    hooks:
+      - id: offline-suite
+        name: offline test suite
+        entry: python -m pytest -q
+        language: system
+        pass_filenames: false
+        types: [python]
