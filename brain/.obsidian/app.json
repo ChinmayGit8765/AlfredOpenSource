@@ -1,0 +1,13 @@
+{
+  "attachmentFolderPath": "assets",
+  "alwaysUpdateLinks": true,
+  "newLinkFormat": "shortest",
+  "useMarkdownLinks": false,
+  "showLineNumber": true,
+  "strictLineBreaks": false,
+  "readableLineLength": true,
+  "defaultViewMode": "preview",
+  "promptDelete": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "00-maps"
+}

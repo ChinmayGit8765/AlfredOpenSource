@@ -366,6 +366,33 @@ Secrets live only in the environment. The Discord token is read from
 The suite runs fully offline against real in-memory implementations of
 every port (not mocks). Nothing needs Ollama or Discord.
 
+Alongside the behaviour tests, `tests/test_architecture.py` asserts the
+binding rules from [ARCHITECTURE.md](ARCHITECTURE.md) against the parsed
+source: the domain imports no adapter, runtime, config, or I/O library and
+reads time only through `ClockPort`; adapters are named only in the
+composition root; `ModelPort.complete` has exactly one caller outside the
+adapter layer, which is `structured_call`; `ToolPort.invoke` has exactly
+one, which is the dispatcher; and no store call names its collection with a
+bare string. A rule that lives only in prose gets broken by the first
+plausible-looking patch.
+
+CI additionally runs `ruff`, `mypy --strict`, branch coverage floors for
+the package and, higher, for the domain and ports, a clean-environment
+install of the built wheel, and a security workflow (`pip-audit`, CodeQL,
+and a full-history secret scan).
+
+## The brain
+
+[`brain/`](brain/README.md) is an Obsidian vault holding the engineering
+standards this project is built against, the decisions taken under them,
+and a live audit of the repository's actual state against each one:
+[the scorecard](brain/30-audit/Repository%20Audit.md), the
+[gap register](brain/30-audit/Gap%20Register.md), and the
+[threat model](brain/30-audit/Threat%20Model.md).
+
+It is plain Markdown and needs no Obsidian to read. Start at
+[Brain Home](brain/00-maps/Brain%20Home.md).
+
 ## Roadmap
 
 The horizon, in order (see [docs/SPEC.md](docs/SPEC.md)):
